@@ -210,6 +210,8 @@ def create_gift(con, data: dict, token: dict) -> int:
     require(token, "create")
     if is_school() and "santa" in data:
         raise ApiError(400, "Santa is not used in school mode.")
+    if data.get("exchange_id") is not None:
+        raise ApiError(400, "Exchanges are not available to agents.")
     if "santa" in data and data["santa"] is not None and not sees_protected(token):
         raise refuse(token)
     if not sees_protected(token):

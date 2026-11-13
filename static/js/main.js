@@ -15,6 +15,7 @@ const SCREENS = {
   board: () => import("./board.js"),
   lists: () => import("./lists.js"),
   places: () => import("./places.js"),
+  exchanges: () => import("./exchanges.js"),
   settings: () => import("./settings.js"),
   tokens: () => import("./tokens.js"),
 };

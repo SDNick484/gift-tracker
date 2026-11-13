@@ -189,6 +189,8 @@ def delete_person(con, person_id: int) -> None:
                            "SELECT 1 FROM gift_givers WHERE person_id = ?", (person_id, person_id)).fetchone()
         if used:
             raise ApiError(409, "This person has gifts. Deactivate them instead.")
+        if con.execute("SELECT 1 FROM exchange_draws WHERE drawer_id = ? OR recipient_id = ?", (person_id, person_id)).fetchone():
+            raise ApiError(409, "This person is in a gift exchange. Deactivate them instead.")
         con.execute("DELETE FROM people WHERE id = ?", (person_id,))
 
 

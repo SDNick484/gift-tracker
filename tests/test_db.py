@@ -179,7 +179,8 @@ def _v3_database(path):
 def test_a_v3_database_migrates_to_v4_keeping_its_rows(tmp_path):
     c = _v3_database(tmp_path / "t.db")
     db.migrate(c)
-    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION) == "4"
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
+    assert db.SCHEMA_VERSION >= 4
     assert tuple(c.execute("SELECT title, status, seller, ship_to_id, eta, ordered_by FROM gifts").fetchone()) == \
         ("Card", "ordered", "Shop", 1, "2026-12-09", "Alex")
     assert [tuple(r) for r in c.execute("SELECT label, is_home FROM addresses")] == [("Home", 1)]
@@ -234,3 +235,85 @@ def test_deleting_a_gift_deletes_its_agent_notes(con):
     con.execute("DELETE FROM gifts WHERE id = 1")
     assert con.execute("SELECT COUNT(*) FROM gift_agent_log").fetchone()[0] == 0
     assert con.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------- version 5: gift exchanges
+def _v4_database(path):
+    """A database exactly as version 4 left it: an ordered gift."""
+    c = db.connect(str(path))
+    for stmt in db._statements(db.SCHEMA):
+        c.execute(stmt)
+    for version in (2, 3, 4):
+        db.MIGRATIONS[version](c)
+    c.execute("INSERT INTO meta VALUES ('schema_version', '4')")
+    c.execute("INSERT INTO people (id, name) VALUES (1, 'Jordan')")
+    c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
+    c.execute("INSERT INTO gifts (id, occasion_id, title, status, seller, created_by, created_at, updated_at) "
+              "VALUES (1, 1, 'Card', 'ordered', 'Shop', 'a', 0, 0)")
+    c.execute("INSERT INTO gift_recipients (gift_id, person_id) VALUES (1, 1)")
+    return c
+
+
+def test_a_v4_database_migrates_to_v5_keeping_its_rows(tmp_path):
+    c = _v4_database(tmp_path / "t.db")
+    db.migrate(c)
+    assert db.SCHEMA_VERSION >= 5
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
+    assert tuple(c.execute("SELECT title, status, seller, exchange_id FROM gifts").fetchone()) == ("Card", "ordered", "Shop", None)
+    assert [tuple(r) for r in c.execute("SELECT gift_id, person_id FROM gift_recipients")] == [(1, 1)]
+    assert c.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM exchange_draws").fetchone()[0] == 0
+    db.migrate(c)  # again: nothing changes
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key='schema_version'").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM gifts").fetchone()[0] == 1
+    c.close()
+
+
+def test_a_fresh_database_has_the_v5_tables(con):
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('exchanges')")] == \
+        ["id", "occasion_id", "name", "budget_cents", "date"]
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('exchange_draws')")] == \
+        ["exchange_id", "drawer_id", "recipient_id"]
+    cols = {name: (type_, notnull, default) for name, type_, notnull, default in _shape(con, "gifts")}
+    assert cols["exchange_id"] == ("INTEGER", 0, None)
+
+
+def test_the_v5_migrated_tables_match_a_fresh_database(tmp_path, con):
+    c = _v4_database(tmp_path / "t.db")
+    db.migrate(c)
+    for table in ("gifts", "exchanges", "exchange_draws"):
+        assert _shape(c, table) == _shape(con, table), table
+    c.close()
+
+
+def _exchange_world(con):
+    con.execute("INSERT INTO people (id, name) VALUES (101, 'Casey'), (102, 'Jordan')")
+    con.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'X', 'christmas', '2026-12-25')")
+    con.execute("INSERT INTO exchanges (id, occasion_id, name, budget_cents) VALUES (1, 1, 'Secret Santa', 2500)")
+    con.execute("INSERT INTO exchange_draws (exchange_id, drawer_id, recipient_id) VALUES (1, 101, 102)")
+
+
+def test_a_drawer_has_one_draw_per_exchange(con):
+    _exchange_world(con)
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO exchange_draws (exchange_id, drawer_id, recipient_id) VALUES (1, 101, 102)")
+
+
+def test_deleting_an_exchange_deletes_its_draws_but_not_while_a_gift_uses_it(con):
+    _exchange_world(con)
+    con.execute("INSERT INTO gifts (id, occasion_id, title, status, exchange_id, created_by, created_at, updated_at) "
+                "VALUES (1, 1, 'Mug', 'idea', 1, 'a', 0, 0)")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("DELETE FROM exchanges WHERE id = 1")
+    con.execute("DELETE FROM gifts WHERE id = 1")
+    con.execute("DELETE FROM exchanges WHERE id = 1")
+    assert con.execute("SELECT COUNT(*) FROM exchange_draws").fetchone()[0] == 0
+
+
+def test_deleting_an_occasion_deletes_its_exchanges_draws_and_gifts(con):
+    _exchange_world(con)
+    con.execute("INSERT INTO gifts (id, occasion_id, title, status, exchange_id, created_by, created_at, updated_at) "
+                "VALUES (1, 1, 'Mug', 'idea', 1, 'a', 0, 0)")
+    con.execute("DELETE FROM occasions WHERE id = 1")
+    for table in ("exchanges", "exchange_draws", "gifts"):
+        assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table

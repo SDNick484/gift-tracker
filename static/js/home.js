@@ -68,6 +68,21 @@ const renderEmpty = summary => (summary.groups.length || summary.protected.peopl
 export const renderCounts = c => `<p class="counts"><a href="#/lists/pending">Not here yet ${esc(c.pending)}</a> · <a href="#/lists/to-wrap">To wrap ${esc(c.to_wrap)}</a> · <a href="#/lists/where">Where is it?</a></p>`;
 const renderCountsRow = c => (c ? renderCounts(c) : "");
 
+// The occasion's exchanges, one row each: name, budget, date and how many draws are over budget. Nothing when there
+// are none (the summary of a server without exchanges sends no list). The draws are on #/exchanges.
+const renderOverCount = ex => {
+  const over = ex.draws.filter(d => d.over_budget).length;
+  return over ? `<span class="badge warn">${esc(over)} over budget</span>` : "";
+};
+const renderExchangeDate = ex => (ex.date ? ` · ${esc(ex.date)}` : "");
+const renderExchangeRow = ex => `<li class="row"><a class="main" href="#/exchanges"><div class="name">${esc(ex.name)}</div>
+  <div class="line">${esc(ex.draws.length)} ${esc(ex.draws.length === 1 ? "draw" : "draws")} · ${esc(Number.isInteger(ex.budget_cents) ? money(ex.budget_cents) : "no limit")}${renderExchangeDate(ex)}</div></a>
+  <div class="amt">${renderOverCount(ex)}</div></li>`;
+const renderExchangeRows = list => list.map(renderExchangeRow).join("");
+export const renderExchangesSection = list => (list?.length
+  ? `<section><h3>Exchanges</h3><ul class="rows">${renderExchangeRows(list)}</ul></section>`
+  : "");
+
 export const renderHome = (summary, occasions, anyProtected, counts = null) => `
   <div class="head">
     <div class="picker">
@@ -77,6 +92,7 @@ export const renderHome = (summary, occasions, anyProtected, counts = null) => `
   </div>
   <a class="btn primary big-add" href="#/idea">${renderIcon("plus")} Idea</a>
   ${renderCountsRow(counts)}
+  ${renderExchangesSection(summary.exchanges)}
   ${renderProtectedSection(summary, anyProtected)}
   <div class="cols">${renderGroups(summary.groups)}</div>
   ${renderEmpty(summary)}`;

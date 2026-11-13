@@ -1059,3 +1059,84 @@ test("order card: agent notes are listed, escaped, and absent when there are non
   const places = { addresses: ADDRESSES, locations: LOCATIONS, school: false };
   assert.ok(renderGiftPage(orderGift({ agent_log: log }), people4, "X", true, places).includes("Agent notes"));
 });
+
+
+// ---------------------------------------------------------------- gift exchanges
+import { budgetText, drawerChoices, drawLine, exchangePayload, giftPayload, recipientChoices, renderExchange, renderExchanges, render as renderExchangesScreen, undrawn } from "../static/js/exchanges.js";
+import { renderExchangesSection } from "../static/js/home.js";
+
+const exPeople = [
+  { id: 1, name: "Alex", color: "#1f4d3a", is_user: true, protected: false, active: true },
+  { id: 3, name: `<b>Jordan</b>`, color: "#3a5f9a", is_user: false, protected: false, active: true },
+  { id: 6, name: "Kid 1", color: "#c0392b", is_user: false, protected: true, active: true },
+  { id: 7, name: "Old", color: null, is_user: false, protected: false, active: false },
+];
+const exDraw = (over = {}) => ({ drawer_id: 1, recipient_id: 3, gift_id: null, gift_title: null, gift_status: null, price_cents: null, over_budget: false, ...over });
+const exchange = (over = {}) => ({ id: 4, name: `<i>Secret Santa</i>`, budget_cents: 2500, date: "2026-12-20", draws: [exDraw()], ...over });
+
+test("exchanges: a draw says who drew whom, escapes names and titles, and offers a gift form only while it has none", () => {
+  const bare = drawLine(exchange(), exDraw(), exPeople);
+  assert.ok(bare.includes("Alex drew &lt;b&gt;Jordan&lt;/b&gt;") && bare.includes("no gift yet") && bare.includes('data-form="gift-add"'));
+  assert.ok(!bare.includes("over budget") && !bare.includes("<b>"));
+  const done = drawLine(exchange(), exDraw({ gift_id: 9, gift_title: EVIL, gift_status: "idea", price_cents: 2500 }), exPeople);
+  assert.ok(done.includes('href="#/gift/9"') && done.includes("&lt;img src=x") && !done.includes(EVIL));
+  assert.ok(done.includes("$25.00") && !done.includes("over budget") && !done.includes('data-form="gift-add"'), "at the budget is not over");
+  assert.ok(drawLine(exchange(), exDraw({ gift_id: 9, gift_title: "Watch", gift_status: "idea", price_cents: 2501, over_budget: true }), exPeople).includes('<span class="badge warn">over budget</span>'));
+});
+
+test("exchanges: no markup carries a style attribute or an inline handler", () => {
+  const html = renderExchanges([exchange({ draws: [exDraw({ gift_id: 9, gift_title: "x", gift_status: "idea", price_cents: 1, over_budget: true })] })], exPeople, EVIL, true);
+  assert.ok(!/\sstyle=|\sonclick=|<script/i.test(html));
+  assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;") && html.includes('data-color="#1f4d3a"'));
+});
+
+test("exchanges: a locked page offers no protected person; unlocked it offers protected drawers", () => {
+  assert.deepEqual(drawerChoices(exPeople, false).map(p => p.id), [1]);
+  assert.deepEqual(drawerChoices(exPeople, true).map(p => p.id), [1, 6]);
+  assert.deepEqual(recipientChoices(exPeople, false, 1).map(p => p.id), [3]);
+  assert.deepEqual(recipientChoices(exPeople, true, 1).map(p => p.id), [3, 6], "inactive people and the drawer are not offered");
+  assert.deepEqual(undrawn(exchange(), exPeople, true).map(p => p.id), [6]);
+  const locked = renderExchange(exchange({ draws: [] }), exPeople, false);
+  assert.ok(!locked.includes("Kid 1"));
+  assert.ok(renderExchange(exchange({ draws: [] }), exPeople, true).includes("Kid 1"));
+});
+
+test("exchanges: exchangePayload sends cents, null for blanks, and refuses a bad amount", () => {
+  assert.deepEqual(exchangePayload({ name: "  Office  ", budget: "$25", date: "2026-12-20" }), { name: "Office", budget_cents: 2500, date: "2026-12-20" });
+  assert.deepEqual(exchangePayload({ name: "A", budget: "", date: "" }), { name: "A", budget_cents: null, date: null });
+  assert.throws(() => exchangePayload({ name: "A", budget: "lots", date: "" }), /amount/);
+  assert.deepEqual(giftPayload(9, 4, exDraw(), { title: " Mug ", price: " 20 " }),
+    { occasion_id: 9, title: "Mug", price: "20", recipient_ids: [3], giver_ids: [1], exchange_id: 4 });
+  assert.equal(giftPayload(9, 4, exDraw(), { title: "Mug", price: "" }).price, null);
+  assert.equal(budgetText(null), "no limit");
+  assert.equal(budgetText(2500), "$25.00 limit");
+});
+
+test("home: the exchanges section is empty without exchanges and links to the screen with an over-budget count", () => {
+  assert.equal(renderExchangesSection(undefined), "");
+  assert.equal(renderExchangesSection([]), "");
+  const html = renderExchangesSection([exchange({ draws: [exDraw({ over_budget: true }), exDraw({ drawer_id: 2 })] })]);
+  assert.ok(html.includes('href="#/exchanges"') && html.includes("2 draws") && html.includes("$25.00") && html.includes("1 over budget"));
+  assert.ok(html.includes("&lt;i&gt;Secret Santa&lt;/i&gt;") && !html.includes("<i>"));
+  assert.ok(!renderExchangesSection([exchange({ draws: [exDraw()], budget_cents: null })]).includes("over budget"));
+  const summary = { occasion: { id: 1 }, days_until: 3, groups: [], protected: { locked: true, people: [] } };
+  assert.ok(!renderHome(summary, [{ id: 1, name: "X", archived: false }], false).includes("Exchanges"), "no exchanges key: the old home");
+  assert.ok(renderHome({ ...summary, exchanges: [exchange()] }, [{ id: 1, name: "X", archived: false }], false).includes("Exchanges"));
+});
+
+test("exchanges screen: asks for the current occasion's exchanges and draws them", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(`${init.method} ${url}`);
+    return { ok: true, status: 200, json: async () => [exchange()] };
+  };
+  Object.assign(state, { me: { email: "a@example.com", unlocked: false }, occasionId: 9, people: exPeople, occasions: [{ id: 9, name: "Xmas", archived: false }] });
+  const view = { innerHTML: "", addEventListener() {} };
+  await renderExchangesScreen({ view, alive: () => true, parts: ["exchanges"], rerender() {} });
+  assert.deepEqual(calls, ["GET /api/occasions/9/exchanges"]);
+  assert.ok(view.innerHTML.includes("Exchanges") && !view.innerHTML.includes("Kid 1"));
+  state.occasionId = null;
+  const none = { innerHTML: "", addEventListener() {} };
+  await renderExchangesScreen({ view: none, alive: () => true, parts: ["exchanges"], rerender() {} });
+  assert.ok(none.innerHTML.includes("No occasion yet"));
+});

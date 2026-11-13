@@ -14,6 +14,7 @@ import agent
 import boards
 import budgets
 import db as database
+import exchanges
 import gifts
 import identity
 import lists
@@ -368,10 +369,28 @@ def refuse_locked_write(data: dict) -> None:
         raise locked()
 
 
+def refuse_locked_exchange_write(data: dict, gift_id: int | None = None) -> None:
+    """While locked, a gift that is (or, with this body, would be) the gift for an exchange draw may not have a
+    protected giver: its draw would be protected data. 423, as for a protected recipient. Checked before the
+    exchange itself is looked at, so the answer tells nothing about which draws exist."""
+    if is_school() or unlocked():
+        return
+    old = gifts.get(db(), gift_id) if gift_id is not None else None
+    link = data["exchange_id"] if "exchange_id" in data else (old["exchange_id"] if old else None)
+    if link is None or isinstance(link, bool) or not isinstance(link, int):
+        return
+    givers = data.get("giver_ids")
+    if not isinstance(givers, list):
+        givers = [r[0] for r in db().execute("SELECT person_id FROM gift_givers WHERE gift_id = ?", (gift_id,))] if old else []
+    if people.protected_ids(db()) & {i for i in givers if isinstance(i, int) and not isinstance(i, bool)}:
+        raise locked()
+
+
 @app.post("/api/gifts")
 def gifts_create():
     data = json_body()
     refuse_locked_write(data)
+    refuse_locked_exchange_write(data)
     gid = gifts.create(db(), g.user, data)
     return jsonify(gift_json(visible_gift(gid))), 201
 
@@ -386,6 +405,7 @@ def gifts_update(gift_id):
     visible_gift(gift_id)
     data = json_body()
     refuse_locked_write(data)
+    refuse_locked_exchange_write(data, gift_id)
     gifts.update(db(), gift_id, data, actor=g.user["name"])
     return jsonify(gift_json(visible_gift(gift_id)))
 
@@ -549,6 +569,41 @@ def lists_where(occasion_id):
 @app.get("/api/occasions/<int:occasion_id>/lists/counts")
 def lists_counts(occasion_id):
     return jsonify(lists.counts(db(), occasion_id, unlocked=unlocked()))
+
+
+# -- gift exchanges (both modes). Protected draws are filtered and refused inside exchanges.py with `unlocked`; deleting
+# an exchange needs the unlock because "has gifts" (409) against "deleted" would tell whether a hidden gift is linked.
+@app.get("/api/occasions/<int:occasion_id>/exchanges")
+def exchanges_list(occasion_id):
+    return jsonify(exchanges.list_for_occasion(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.post("/api/occasions/<int:occasion_id>/exchanges")
+def exchanges_create(occasion_id):
+    return jsonify(exchanges.create(db(), occasion_id, json_body(), unlocked=unlocked())), 201
+
+
+@app.patch("/api/exchanges/<int:exchange_id>")
+def exchanges_update(exchange_id):
+    return jsonify(exchanges.update(db(), exchange_id, json_body(), unlocked=unlocked()))
+
+
+@app.delete("/api/exchanges/<int:exchange_id>")
+@unlock_required
+def exchanges_delete(exchange_id):
+    exchanges.delete(db(), exchange_id)
+    return jsonify(ok=True)
+
+
+@app.put("/api/exchanges/<int:exchange_id>/draws/<int:person_id>")
+def exchange_draw_set(exchange_id, person_id):
+    """{recipient_id}: this person (the drawer) drew that person."""
+    return jsonify(exchanges.set_draw(db(), exchange_id, person_id, json_body(), unlocked=unlocked()))
+
+
+@app.delete("/api/exchanges/<int:exchange_id>/draws/<int:person_id>")
+def exchange_draw_remove(exchange_id, person_id):
+    return jsonify(exchanges.remove_draw(db(), exchange_id, person_id, unlocked=unlocked()))
 
 
 # -- agent tokens, managed by a signed-in owner. All three need the unlock: a full token is as strong as the PIN, and
