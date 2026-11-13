@@ -16,7 +16,7 @@ from test_privacy import api_rules, urls
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAMILY_ONLY = {"lock_set_pin", "lock_unlock", "lock_lock", "person_board", "gifts_assign",
-               "locations_list", "locations_create", "locations_update", "locations_delete"}
+               "locations_list", "locations_create", "locations_update", "locations_delete", "lists_where"}
 SCHOOL_ONLY = {"school_matrix", "school_cell_set", "school_cell_remove", "school_role_add"}
 
 

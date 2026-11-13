@@ -15,6 +15,7 @@ import budgets
 import db as database
 import gifts
 import identity
+import lists
 import lock
 import locations
 import occasions
@@ -501,6 +502,29 @@ def locations_update(location_id):
 def locations_delete(location_id):
     locations.delete(db(), location_id)
     return jsonify(ok=True)
+
+
+# -- after purchase: the working lists. All filter on the lock (gifts.PROTECTED_SQL) inside lists.py; "where" is
+# family only because it is about hiding places.
+@app.get("/api/occasions/<int:occasion_id>/lists/pending")
+def lists_pending(occasion_id):
+    return jsonify(lists.pending(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.get("/api/occasions/<int:occasion_id>/lists/to-wrap")
+def lists_to_wrap(occasion_id):
+    return jsonify(lists.to_wrap(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.get("/api/occasions/<int:occasion_id>/lists/where")
+@family_only
+def lists_where(occasion_id):
+    return jsonify(lists.where(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.get("/api/occasions/<int:occasion_id>/lists/counts")
+def lists_counts(occasion_id):
+    return jsonify(lists.counts(db(), occasion_id, unlocked=unlocked()))
 
 
 init_db()

@@ -5,8 +5,11 @@ import pytest
 import db
 import settings
 from conftest import auth, con_rows, mk_gift, mk_protected_gift, mut
+import test_privacy
+from test_privacy import MARKERS, api_rules, protected_state, urls, walk_gets
 
 LOCKED = {"error": "Locked", "locked": True}
+world = test_privacy.world  # the fixture of the privacy walk, reused below
 
 
 @pytest.fixture
@@ -313,3 +316,193 @@ def test_a_locked_request_cannot_reach_a_protected_gifts_order_fields(client, id
         r = client.open(url, method=method, json=body, headers=mut())
         assert (r.status_code, r.get_json()) == (404, {"error": "No such gift."}), (method, url)
     assert con_rows("SELECT status, seller, ordered_by FROM gifts WHERE id = ?", g) == [("idea", None, None)]
+
+
+# ---------------------------------------------------------------- the lists
+def stage(gift_id, status, **cols):
+    """Put a gift in a state directly (the lists read what is stored)."""
+    cols = {"status": status, **cols}
+    sql(f"UPDATE gifts SET {', '.join(f'{k} = ?' for k in cols)} WHERE id = ?", *cols.values(), gift_id)
+
+
+def lst(client, ids, name):
+    return get(client, f"/api/occasions/{ids.o}/lists/{name}")
+
+
+def test_pending_is_ordered_gifts_by_eta_with_overdue(client, ids, freeze_today):
+    freeze_today("2026-12-10")
+    later, yesterday, today, nodate, decided, arrived = (mk_gift(client, ids.o, n, to=[ids.jordan], frm=[ids.alex]) for n in
+                                                          ("Later", "Yesterday", "Today", "No date", "Decided", "Arrived"))
+    stage(later, "ordered", eta="2026-12-12", seller="A")
+    stage(yesterday, "ordered", eta="2026-12-09")
+    stage(today, "ordered", eta="2026-12-10")
+    stage(nodate, "ordered")                       # created as ordered through the API: allowed, and it has no date
+    stage(arrived, "arrived", eta="2026-12-01")    # not pending, and an arrived gift is never overdue
+    got = lst(client, ids, "pending")["gifts"]
+    assert [(g["title"], g["eta"], g["overdue"]) for g in got] == [
+        ("Yesterday", "2026-12-09", True), ("Today", "2026-12-10", False), ("Later", "2026-12-12", False), ("No date", None, False)]
+    assert got[2]["seller"] == "A" and got[2]["recipient_ids"] == [ids.jordan] and decided
+
+
+@pytest.mark.parametrize("day, overdue", [("2026-12-09", False), ("2026-12-10", False), ("2026-12-11", True)])
+def test_overdue_flips_the_day_after_the_expected_date(client, ids, freeze_today, day, overdue):
+    freeze_today(day)
+    stage(mk_gift(client, ids.o, "Camera", to=[ids.jordan], frm=[ids.alex]), "ordered", eta="2026-12-10")
+    assert [g["overdue"] for g in lst(client, ids, "pending")["gifts"]] == [overdue]
+
+
+def test_pending_carries_the_ship_warning(client, ids):
+    gp = make_address(client, "Grandparents' house")
+    a, b, c = (mk_gift(client, ids.o, n, to=[ids.jordan], frm=[ids.alex]) for n in ("A", "B", "C"))
+    stage(a, "ordered", eta="2026-12-09", ship_to_id=gp)
+    stage(b, "ordered", eta="2026-12-10", ship_to_id=gp, ship_elsewhere_ok=1)
+    stage(c, "ordered", eta="2026-12-11", ship_to_id=1)
+    assert [(g["title"], g["ship_to_id"] == gp, g["ship_warning"]) for g in lst(client, ids, "pending")["gifts"]] == [
+        ("A", True, True), ("B", True, False), ("C", False, False)]
+
+
+def test_to_wrap_groups_arrived_gifts_by_recipient_with_the_place(client, ids):
+    _, shelf, bin_ = make_chain(client)
+    both = mk_gift(client, ids.o, "Board game", to=[ids.riley, ids.jordan], frm=[ids.alex])
+    solo = mk_gift(client, ids.o, "Scarf", to=[ids.casey], frm=[ids.sam])
+    wrapped, ordered = (mk_gift(client, ids.o, n, to=[ids.jordan], frm=[ids.alex]) for n in ("Wrapped", "Ordered"))
+    stage(both, "arrived", location_id=bin_)
+    stage(solo, "arrived")
+    stage(wrapped, "wrapped")
+    stage(ordered, "ordered", eta="2026-12-09")
+    groups = lst(client, ids, "to-wrap")["groups"]
+    assert [(g["person_id"], [(x["title"], x["location_path"]) for x in g["gifts"]]) for g in groups] == [
+        (ids.jordan, [("Board game", "Garage › Top shelf › Blue bin")]),     # people come in the order they are listed
+        (ids.riley, [("Board game", "Garage › Top shelf › Blue bin")]),
+        (ids.casey, [("Scarf", None)])]
+    assert shelf
+
+
+def test_where_groups_by_place_in_tree_order_and_leaves_unplaced_last(client, ids):
+    garage, _, bin_ = make_chain(client)
+    closet = make_location(client, "Hall closet")
+    a, b, c, d, e, f = (mk_gift(client, ids.o, n, to=[ids.jordan], frm=[ids.alex]) for n in "ABCDEF")
+    stage(a, "arrived", location_id=closet)
+    stage(b, "wrapped", location_id=bin_)
+    stage(c, "arrived", location_id=bin_)
+    stage(d, "wrapped")
+    stage(e, "ordered", eta="2026-12-09", location_id=garage)     # not in the house yet
+    stage(f, "given", location_id=garage)                         # no longer in the house
+    groups = lst(client, ids, "where")["groups"]
+    assert [(g["path"], [x["title"] for x in g["gifts"]]) for g in groups] == [
+        ("Garage › Top shelf › Blue bin", ["B", "C"]), ("Hall closet", ["A"]), (None, ["D"])]
+    assert [g["location_id"] for g in groups] == [bin_, closet, None]
+
+
+def test_counts_are_gifts_not_rows(client, ids):
+    both = mk_gift(client, ids.o, "Board game", to=[ids.riley, ids.jordan], frm=[ids.alex])
+    a, b, c = (mk_gift(client, ids.o, n, to=[ids.jordan], frm=[ids.alex]) for n in "ABC")
+    stage(both, "arrived")
+    stage(a, "ordered", eta="2026-12-09")
+    stage(b, "ordered", eta="2026-12-09")
+    stage(c, "wrapped")
+    assert lst(client, ids, "counts") == {"pending": 2, "to_wrap": 1}
+    assert len(lst(client, ids, "to-wrap")["groups"]) == 2
+
+
+def test_empty_lists_and_a_missing_occasion(client, ids):
+    assert lst(client, ids, "pending") == {"gifts": []} and lst(client, ids, "to-wrap") == {"groups": []}
+    assert lst(client, ids, "where") == {"groups": []} and lst(client, ids, "counts") == {"pending": 0, "to_wrap": 0}
+    for name in ("pending", "to-wrap", "where", "counts"):
+        assert client.get(f"/api/occasions/999/lists/{name}", headers=auth()).status_code == 404
+
+
+@pytest.fixture
+def hidden(client, ids):
+    """Protected gifts that are ordered, arrived and placed, with markers in every field a list can show, a gift shared
+    with an unprotected person, and one visible control of each kind."""
+    garage, _, bin_ = make_chain(client)
+    secret = make_location(client, "ZZ-PLACE")
+    mine = mk_protected_gift(ids, title="ZZ-SECRET-ORDERED", to=[ids.kid1], santa=True)
+    arrived = mk_protected_gift(ids, title="ZZ-SECRET-ARRIVED", to=[ids.kid2], santa=True)
+    shared = mk_protected_gift(ids, title="ZZ-SECRET-SHARED", to=[ids.kid3, ids.jordan], santa=True)
+    for g, status in ((mine, "ordered"), (arrived, "arrived"), (shared, "arrived")):
+        stage(g, status, seller="ZZ-SELLER", order_number="ZZ-ORDER", eta="2026-12-09", location_id=secret)
+    ctl_ordered = mk_gift(client, ids.o, "CONTROL-ORDERED", to=[ids.jordan], frm=[ids.alex])
+    ctl_arrived = mk_gift(client, ids.o, "CONTROL-ARRIVED", to=[ids.jordan], frm=[ids.alex])
+    stage(ctl_ordered, "ordered", eta="2026-12-10", seller="Camera shop")
+    stage(ctl_arrived, "arrived", location_id=bin_)
+    return garage
+
+
+URLS = ("lists/pending", "lists/to-wrap", "lists/where", "lists/counts")
+
+
+def test_the_lists_hide_protected_gifts_while_locked(client, ids, hidden):
+    for name in URLS:
+        text = client.get(f"/api/occasions/{ids.o}/{name}", headers=auth()).get_data(as_text=True)
+        low = text.lower()
+        assert not any(m in low for m in ("zz-", "santa")), name
+    assert [g["title"] for g in lst(client, ids, "pending")["gifts"]] == ["CONTROL-ORDERED"]
+    assert [(g["person_id"], [x["title"] for x in g["gifts"]]) for g in lst(client, ids, "to-wrap")["groups"]] == [(ids.jordan, ["CONTROL-ARRIVED"])]
+    assert [[x["title"] for x in g["gifts"]] for g in lst(client, ids, "where")["groups"]] == [["CONTROL-ARRIVED"]]
+    assert lst(client, ids, "counts") == {"pending": 1, "to_wrap": 1}
+    # the places and addresses carry no gift: the hidden place's name is just a place
+    assert "gift" not in client.get("/api/locations", headers=auth()).get_data(as_text=True).lower()
+
+
+def test_unlocked_the_same_lists_show_the_protected_gifts(client, ids, hidden, unlock):
+    """The check above is not blind: unlocked, the same requests do list them, and still never name Santa."""
+    unlock()
+    assert sorted(g["title"] for g in lst(client, ids, "pending")["gifts"]) == ["CONTROL-ORDERED", "ZZ-SECRET-ORDERED"]
+    assert lst(client, ids, "counts") == {"pending": 2, "to_wrap": 3}
+    where = {g["path"]: [x["title"] for x in g["gifts"]] for g in lst(client, ids, "where")["groups"]}
+    assert where["ZZ-PLACE"] == ["ZZ-SECRET-ARRIVED", "ZZ-SECRET-SHARED"]
+    for name in URLS:
+        text = client.get(f"/api/occasions/{ids.o}/{name}", headers=auth()).get_data(as_text=True)
+        assert "santa" not in text.lower(), name
+
+
+def test_locking_again_hides_them_again(client, ids, hidden, unlock):
+    unlock()
+    assert lst(client, ids, "counts")["pending"] == 2
+    assert post(client, "/api/lock/lock").status_code == 200
+    assert lst(client, ids, "counts") == {"pending": 1, "to_wrap": 1}
+
+
+def test_where_is_404_in_school_mode_and_the_other_lists_have_no_location_keys(client, ids, school):
+    stage(mk_gift(client, ids.o, "Camera", to=[ids.jordan], frm=[ids.alex]), "arrived")
+    r = client.get(f"/api/occasions/{ids.o}/lists/where", headers=auth())
+    assert (r.status_code, r.get_json()) == (404, client.get("/api/nothing-here", headers=auth()).get_json())
+    item = lst(client, ids, "to-wrap")["groups"][0]["gifts"][0]
+    assert "location_id" not in item and "location_path" not in item and item["title"] == "Camera"
+    assert lst(client, ids, "counts") == {"pending": 0, "to_wrap": 1} and lst(client, ids, "pending") == {"gifts": []}
+
+
+def test_the_privacy_walk_sees_no_order_field_or_place_of_a_protected_gift(client, world):
+    """tests/test_privacy.py's own walk (every GET under /api/, every argument combination), over its fixture with the
+    protected gifts ordered, arrived and placed. The shared fixture gift is "arrived" in the occasion, so it is in
+    to-wrap and where for the unprotected co-recipient's view too."""
+    place = make_location(client, "ZZ-PLACE")
+    for g in world.secret:
+        stage(g, "arrived", seller="ZZ-SECRET-SELLER", order_number="ZZ-SECRET-ORDER", eta="2026-12-09", location_id=place)
+    seen = walk_gets(client, world)
+    assert any(url.endswith("/lists/where") for url in seen) and any(url.endswith("/lists/to-wrap") for url in seen)
+    for url, text in seen.items():
+        low = text.lower()
+        markers = (*MARKERS, "zz-secret", *(("zz-place",) if "/lists/" in url else ()))  # a place's name is no secret, which gift is there is
+        assert not [m for m in markers if m in low], url
+    # the control: a visible gift in the same place is listed, so the absence above means something
+    stage(world.visible, "arrived", location_id=place)
+    assert "VISIBLE-GIFT" in client.get(f"/api/occasions/{world.ids.o}/lists/where", headers=auth()).get_data(as_text=True)
+
+
+def test_no_locked_write_through_the_new_routes_changes_a_protected_gift(client, world):
+    """Every non-GET rule with a hostile body, now including addresses and locations; the protected state is untouched."""
+    before = protected_state()
+    place = make_location(client, "A place")
+    sent = 0
+    for rule in api_rules({"POST", "PUT", "PATCH", "DELETE"}):
+        if not rule.rule.startswith(("/api/addresses", "/api/locations")):
+            continue
+        for method in sorted(rule.methods & {"POST", "PUT", "PATCH", "DELETE"}):
+            for url, _ in urls(rule, world):
+                for body in ({}, {"label": "x", "name": "x", "parent_id": place, "is_home": False}):
+                    assert client.open(url, method=method, json=body, headers=mut()).status_code < 500
+                    sent += 1
+    assert sent >= 8 and protected_state() == before
