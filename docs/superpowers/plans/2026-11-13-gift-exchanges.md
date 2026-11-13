@@ -96,7 +96,7 @@ def test_deleting_an_occasion_deletes_its_exchanges_draws_and_gifts(con)
 ```python
 def test_create_and_list_an_exchange(client, ids):
     r = post(f"/api/occasions/{ids.o}/exchanges", {"name": "Secret Santa", "budget_cents": 2500, "date": "2026-12-20"})
-    assert (r.status_code, r.get_json()) == (201, {"id": 1, "occasion_id": ids.o, "name": "Secret Santa", "budget_cents": 2500, "date": "2026-12-20", "draws": []})
+    assert (r.status_code, r.get_json()) == (201, {"id": 1, "name": "Secret Santa", "budget_cents": 2500, "date": "2026-12-20", "draws": []})
     assert get(f"/api/occasions/{ids.o}/exchanges") == [that]
 def test_bad_exchange_bodies_are_400(...): empty name, 101 chars, budget -1 / 1.5 / True / "5", date "2026-13-01", date 5, unknown occasion 404
 def test_a_draw_is_an_owner_or_a_protected_person(client, ids): alex and kid1 drew; jordan as drawer 400; drawer unknown 404; recipient unknown 400; recipient == drawer 400
@@ -117,8 +117,8 @@ def test_exchange_routes_take_part_in_the_privacy_walks(): args() has exchange_i
 **Files:** Modify `gifts.py` (`to_json`, `create`, `update`), `app.py` (`refuse_locked_write`, `gifts_update`); Test: `tests/test_exchanges.py`.
 
 **Interfaces:**
-- Produces `exchanges.check_gift(con, gift_id, exchange_id)`, run inside the writer's transaction after the givers and recipients are stored: the gift's occasion is the exchange's, it has exactly one giver and one recipient forming a draw of the exchange (400), and no other gift is linked to the draw (409). `exchange_id: null` unlinks. `gifts.create` and `gifts.update` accept `exchange_id`; gift JSON carries it (null when none).
-- `refuse_locked_write(data, existing_exchange_id=None)`: while locked, an exchange gift (the body names `exchange_id`, or the gift being changed has one) whose body names a protected giver is 423.
+- Produces `exchanges.exchange_id_of(con, data)` (null, or an existing exchange's id, else 400) and `exchanges.check_gift(con, gift_id)`, run inside the writer's transaction after the givers and recipients are stored: the gift's occasion is the exchange's, it has exactly one giver and one recipient forming a draw of the exchange (400), and no other gift is linked to the draw (409). `exchange_id: null` unlinks. `gifts.create` and `gifts.update` accept `exchange_id`; gift JSON carries it (null when none).
+- `app.refuse_locked_exchange_write(data, gift_id=None)`, called beside `refuse_locked_write`: while locked, a gift that is or would be an exchange gift (the body names `exchange_id`, or the gift being changed has one) with a protected giver (from the body, else the stored ones) is 423, before the exchange is looked at. `agent.create_gift` refuses `exchange_id` (400): no agent access.
 
 - [ ] **Step 1: Write the failing tests**
 

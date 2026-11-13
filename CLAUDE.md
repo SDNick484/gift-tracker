@@ -88,6 +88,16 @@ Decisions in `docs/superpowers/plans/2026-11-13-agent-api.md`; setup in `docs/mc
 - The installer's MCP service is `$NAME-mcp`: names in the instance block, service script between `# mcp-initd-begin`
   and `# mcp-initd-end`, settings in its own `$MCP_CONF` (never in the app's `$CONF` or `settings.py`).
 
+## Gift exchanges
+
+Decisions in `docs/superpowers/plans/2026-11-13-gift-exchanges.md`. Logic is in `exchanges.py`; routes are `/api/occasions/<id>/exchanges` and `/api/exchanges/...` (no agent API or MCP tool: `agent.create_gift` refuses `exchange_id`).
+
+- This extends the privacy rule above. A draw is protected when its drawer or its recipient is protected; a gift with `exchange_id` is protected when any recipient **or any giver** is. `gifts.PROTECTED_SQL` and `gifts.is_protected` carry both halves, so every list, total, history, matrix and `/api/v1` list that already filters on them hides such a gift. Protection is read from `people.protected` at query time, never stored on a draw.
+- `exchanges.list_for_occasion(..., unlocked=)` is the only reader of draws (the exchange routes and `budgets.summary()["exchanges"]` both use it). `set_draw` and `remove_draw` answer 423 when the drawer or the new recipient is protected, 404 for a hidden draw of an unprotected drawer. Deleting an exchange needs the unlock and is 409 while any gift is linked. `refuse_locked_exchange_write` in `app.py` makes a locked write of an exchange gift with a protected giver 423.
+- A gift for a draw has exactly one giver (the drawer) and one recipient (the person drawn), in the exchange's occasion, one gift per draw (`exchanges.check_gift`, run inside the writer's transaction). A gift from a non-owner is on the theirs track, so it is not counted in spent or planned money.
+- Over budget is computed on read (`exchanges.over_budget`), never stored, and never refuses a write.
+- Copying an occasion copies exchange names and budgets only. School mode has exchanges but no lock and only owners may draw; no exchange route is mode-specific.
+
 ## File structure
 
 ```
@@ -107,6 +117,7 @@ orders.py         order fields, the ship-to check, the one writer (update), ship
 addresses.py      ship-to addresses, exactly one home
 locations.py      the hiding-place tree, the ancestor rule, set_gift_location
 lists.py          Not here yet, To wrap, Where is it?, and the home counts
+exchanges.py      gift exchanges: draws, the gift for a draw, the over-budget flag, the lock on protected draws
 tokens.py         agent API tokens (hash only), the notes a token leaves on a gift
 agent.py          /api/v1: what each token scope may read and write, a gift as a scope sees it
 mcp_server.py     MCP tools over /api/v1 (TrackerClient; stdio when run directly)

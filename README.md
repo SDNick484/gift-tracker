@@ -16,7 +16,7 @@ DEV_EMAIL=alex@example.com ALLOWED_EMAILS=alex@example.com,sam@example.com \
 
 `DEV_EMAIL` admits requests from loopback that carry no Cloudflare headers, as that user. It is for development only and is never set on the server. Settings are documented at the top of `settings.py`. Add `MODE=school` (and a separate `DATA_DIR`) to try the school instance described under Deployment.
 
-The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/lists/<pending|to-wrap|where>`, `#/places`, `#/settings`, `#/tokens`).
+The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/lists/<pending|to-wrap|where>`, `#/places`, `#/exchanges`, `#/settings`, `#/tokens`).
 
 Tests and lint:
 
@@ -35,6 +35,10 @@ shellcheck -s sh installer/setup-head.sh installer/build.sh ops/tracker-backup
 A gift from us moves `decided` to `ordered` to `arrived` to `wrapped`. Marking it ordered asks for the seller, a ship-to address and the expected date; an address other than Home shows a warning on the gift until you tick "Meant to ship there", so an order headed to the wrong house is caught while it can still be cancelled. Addresses are labels (Home, a relative's house), not street addresses, and exactly one is home. Settings links to the Places screen, where you keep the addresses and a tree of hiding places (Garage, Top shelf, Blue bin).
 
 Three lists, linked from the home screen with their counts: Not here yet (ordered, by expected date, red when overdue), To wrap (arrived, by recipient, with the hiding place) and Where is it? (arrived or wrapped, by hiding place). While the app is locked, a gift for a protected person is in none of them. In a school instance there are no hiding places and no Where is it? list.
+
+## Gift exchanges
+
+Some relatives are only bought for through an exchange with a limit and a date (Secret Santa, Favorite Things, a staff exchange). An exchange belongs to an occasion: a name, a budget and a date, and which of us (or which of the children) drew whom. Add the gift for a draw on the Exchanges screen (linked from Settings, and listed on the home screen); a gift over the limit is flagged, never refused. Only this household's side is kept, never the full pairing. While the app is locked, a draw that involves a protected person, and its gift, is not shown anywhere. Copying an occasion brings each exchange's name and budget, with no draws. A school instance has exchanges too, with no lock.
 
 ## Agents
 
