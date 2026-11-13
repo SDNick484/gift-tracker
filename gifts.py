@@ -21,8 +21,13 @@ THEIRS = ("told", "confirmed", "given")
 
 # True for a gift (aliased `g` in the enclosing query) with any protected recipient. Every query that can show a
 # gift while locked filters on this, so a gift shared with a protected person is hidden as a whole.
-PROTECTED_SQL = ("EXISTS (SELECT 1 FROM gift_recipients pr JOIN people pp ON pp.id = pr.person_id "
-                 "WHERE pr.gift_id = g.id AND pp.protected = 1)")
+#
+# A gift linked to an exchange is also protected when any giver is: it is the gift for a draw, and a draw whose drawer
+# is protected is protected data (exchanges.py). The whole predicate is parenthesised so `NOT {PROTECTED_SQL}` holds.
+PROTECTED_SQL = ("(EXISTS (SELECT 1 FROM gift_recipients pr JOIN people pp ON pp.id = pr.person_id "
+                 "WHERE pr.gift_id = g.id AND pp.protected = 1) "
+                 "OR (g.exchange_id IS NOT NULL AND EXISTS (SELECT 1 FROM gift_givers pg JOIN people pq ON pq.id = pg.person_id "
+                 "WHERE pg.gift_id = g.id AND pq.protected = 1)))")
 
 
 def track(giver_ids: set[int], user_ids: set[int]) -> str:
@@ -51,9 +56,9 @@ def get(con, gift_id: int):
 
 
 def is_protected(con, gift_id: int) -> bool:
-    """Whether any recipient is a protected person (active or not)."""
-    return con.execute("SELECT 1 FROM gift_recipients r JOIN people p ON p.id = r.person_id "
-                       "WHERE r.gift_id = ? AND p.protected = 1 LIMIT 1", (gift_id,)).fetchone() is not None
+    """Whether any recipient is a protected person (active or not), or, for a gift linked to an exchange, any giver.
+    The same rule as PROTECTED_SQL."""
+    return con.execute("SELECT 1 FROM gifts g WHERE g.id = ? AND " + PROTECTED_SQL, (gift_id,)).fetchone() is not None
 
 
 def visible(con, gift_id: int, *, unlocked: bool) -> bool:
