@@ -11,6 +11,7 @@ left out of the summary."""
 from datetime import date
 
 import common
+import exchanges
 import gifts
 import occasions
 import people
@@ -67,7 +68,8 @@ def person_totals(con, occasion_id: int, *, include_protected: bool) -> dict[int
 def summary(con, occasion_id: int, *, unlocked: bool) -> dict:
     """The home screen for one occasion. People shown: every active person who is not an owner, plus anyone with
     a plan in this occasion or a gift shown here. Protected people are only ever in the `protected` section, and
-    that section is empty while locked."""
+    that section is empty while locked. `exchanges` is the occasion's exchanges with their draws (exchanges.py), protected
+    draws left out while locked."""
     occ = occasions.get(con, occasion_id)
     gift_list = _gifts(con, occasion_id, unlocked)
     user_ids = people.user_person_ids(con)
@@ -103,4 +105,5 @@ def summary(con, occasion_id: int, *, unlocked: bool) -> dict:
                          "archived": bool(occ["archived"])},
             "days_until": (date.fromisoformat(occ["date"]) - date.fromisoformat(common.today())).days,
             "groups": [g for g in [*groups, ungrouped] if g["people"]],
-            "protected": {"locked": not unlocked, "people": protected}}
+            "protected": {"locked": not unlocked, "people": protected},
+            "exchanges": exchanges.list_for_occasion(con, occasion_id, unlocked=unlocked)}

@@ -8,6 +8,7 @@ import test_privacy
 from conftest import auth, bearer, con_rows, mk_gift, mk_occasion, mk_token, mut
 
 import agent
+import exchanges
 import gifts
 
 LOCKED = {"error": "Locked", "locked": True}
@@ -350,3 +351,58 @@ def test_no_locked_write_under_api_changes_or_reveals_a_protected_draw(client, i
                         assert r.status_code in (404, 423), (method, url)
                     assert protected_exchange_state() == before, (method, url, body)
     assert sent > 40
+
+
+# ---------------------------------------------------------------- the home summary and the over-budget flag
+@pytest.mark.parametrize("price, budget, want", [(2501, 2500, True), (2500, 2500, False), (2499, 2500, False),
+                                                  (None, 2500, False), (9999, None, False), (0, 0, False), (1, 0, True)])
+def test_over_budget_boundaries(price, budget, want):
+    assert exchanges.over_budget(price, budget) is want
+
+
+def summary(client, ids):
+    return client.get(f"/api/occasions/{ids.o}/summary", headers=auth()).get_json()
+
+
+def test_the_summary_lists_each_exchange_with_its_draws(client, ids):
+    ex = mk_exchange(client, ids, budget=2500)
+    put_draw(client, ex, ids.alex, ids.jordan)
+    put_draw(client, ex, ids.sam, ids.riley)
+    gid = mk_gift(client, ids.o, "Mug", to=[ids.jordan], frm=[ids.alex], exchange_id=ex, price="30")
+    assert summary(client, ids)["exchanges"] == [{"id": ex, "name": "Secret Santa", "budget_cents": 2500, "date": "2026-12-20", "draws": [
+        {"drawer_id": ids.alex, "recipient_id": ids.jordan, "gift_id": gid, "gift_title": "Mug", "gift_status": "idea",
+         "price_cents": 3000, "over_budget": True},
+        {"drawer_id": ids.sam, "recipient_id": ids.riley, "gift_id": None, "gift_title": None, "gift_status": None,
+         "price_cents": None, "over_budget": False}]}]
+    assert listing(client, ids) == summary(client, ids)["exchanges"]
+    assert client.post(f"/api/gifts/{gid}/status", json={"status": "wrapped"}, headers=mut()).status_code == 200
+    assert summary(client, ids)["exchanges"][0]["draws"][0]["gift_status"] == "wrapped"
+
+
+def test_a_gift_over_the_budget_is_flagged_not_refused(client, ids):
+    ex = mk_exchange(client, ids, budget=2500)
+    put_draw(client, ex, ids.alex, ids.jordan)
+    gid = mk_gift(client, ids.o, "Watch", to=[ids.jordan], frm=[ids.alex], exchange_id=ex, price="25.01")
+    assert con_rows("SELECT price_cents FROM gifts WHERE id = ?", gid) == [(2501,)]
+    assert listing(client, ids)[0]["draws"][0]["over_budget"] is True
+    assert client.patch(f"/api/gifts/{gid}", json={"price": "25.00"}, headers=mut()).status_code == 200
+    assert listing(client, ids)[0]["draws"][0]["over_budget"] is False
+    client.patch(f"/api/exchanges/{ex}", json={"budget_cents": 2000}, headers=mut())
+    assert listing(client, ids)[0]["draws"][0]["over_budget"] is True       # the budget is read when asked, not stored
+
+
+def test_the_summary_exchanges_hide_protected_draws_while_locked(client, ids, world, unlock):
+    s = summary(client, ids)
+    assert [(d["drawer_id"], d["recipient_id"]) for d in s["exchanges"][0]["draws"]] == [(ids.alex, ids.jordan)]
+    assert not leaked(client.get(f"/api/occasions/{ids.o}/summary", headers=auth()).get_data(as_text=True))
+    unlock()
+    assert len(summary(client, ids)["exchanges"][0]["draws"]) == 4
+    assert "ZZ-EXCH-DRAWER" in client.get(f"/api/occasions/{ids.o}/summary", headers=auth()).get_data(as_text=True)
+
+
+def test_exchange_gifts_count_in_money_for_unprotected_recipients(client, ids):
+    ex = mk_exchange(client, ids)
+    put_draw(client, ex, ids.alex, ids.jordan)
+    mk_gift(client, ids.o, "Mug", to=[ids.jordan], frm=[ids.alex], exchange_id=ex, price="20")
+    jordan = next(p for g in summary(client, ids)["groups"] for p in g["people"] if p["id"] == ids.jordan)
+    assert (jordan["planned_cents"], jordan["gift_count"], jordan["headline"]) == (2000, 1, "Mug")
