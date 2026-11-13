@@ -26,14 +26,18 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import time
 from urllib.parse import urlsplit
 
+import boards
 import common
 import db
+import gifts
+import occasions
 import people
 import settings
-from common import is_school
+from common import ApiError, is_school, text, whole
 
 log = logging.getLogger("tracker.wishlist")
 
@@ -344,3 +348,164 @@ def label(con, giver_ids) -> str | None:
         if part and part not in parts:
             parts.append(part)
     return " & ".join(parts)[:LABEL_MAX].strip() or None
+
+
+# ---------------------------------------------------------------- matching who holds a wish
+def _norm_name(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def _holder(it: dict) -> tuple[str | None, str | None]:
+    """(display name, email) of whoever holds the wish on the wishlist: the purchaser, else the reserver."""
+    if it["purchased"]:
+        return it["purchased_by"], it["purchased_by_email"]
+    return it["reserved_by"], it["reserved_by_email"]
+
+
+def _match(con, name: str | None, email: str | None) -> int | None:
+    """The person a wishlist holder is: an owner by their own email, else an email alias, else a name alias."""
+    if email:
+        r = con.execute("SELECT person_id FROM users WHERE email = ?", (email,)).fetchone() or con.execute(
+            "SELECT person_id FROM wishlist_aliases WHERE kind = 'email' AND value = ?", (email,)).fetchone()
+        if r:
+            return r[0]
+    if name:
+        r = con.execute("SELECT person_id FROM wishlist_aliases WHERE kind = 'name' AND value = ?", (_norm_name(name),)).fetchone()
+        if r:
+            return r[0]
+    return None
+
+
+# ---------------------------------------------------------------- the board
+WISH_KEYS = ("id", "name", "url", "store", "price_cents", "occasion", "secret", "reserved_by", "purchased", "purchased_by")
+
+
+def _wish_json(it: dict) -> dict:
+    return {k: it[k] for k in WISH_KEYS}
+
+
+def _expected(con, gift_id: int) -> tuple[bool, str | None]:
+    """What the wishlist should show for a linked gift: (purchased, by)."""
+    row = gifts.get(con, gift_id)
+    givers = gifts._ids(con, "gift_givers", gift_id)
+    trk = gifts.track(set(givers), people.user_person_ids(con))
+    return trk == "theirs" and row["status"] in PURCHASED, label(con, givers)
+
+
+def _in_sync(it: dict, expected: tuple[bool, str | None]) -> bool:
+    purchased, by = expected
+    if purchased:
+        return it["purchased"] and it["purchased_by"] == by and not it["purchased_by_email"]
+    return not it["purchased"] and it["reserved_by"] == by and not (by and it["reserved_by_email"])
+
+
+def tabs(con, feed_people: list) -> list[dict]:
+    """The wishlist's tabs in the feed, each with the tracker person linked to it (or None)."""
+    linked = {r[0]: r[1] for r in con.execute(
+        "SELECT wishlist_person_id, MIN(id) FROM people WHERE wishlist_person_id IS NOT NULL GROUP BY wishlist_person_id")}
+    return [{"id": p["id"], "name": p["name"], "person_id": linked.get(p["id"])} for p in feed_people]
+
+
+def decorate_board(con, board: dict, person_id: int) -> None:
+    """Add the wishlist to a board (boards.board's answer, for an unlocked caller):
+
+    board["wishlist"] = {linked, tab_id, reachable, fetched_at, age_seconds, tabs, open, reserved, unmatched}: the
+    wishes on the person's tab with no gift in the tracker, open ones in `open`, reserved or purchased ones in
+    `reserved` with the matched `person_id` (or None) and the wishlist's `label`; each unmatched holder once in
+    `unmatched` ({kind, value, label}) for the owner to map. And on every gift linked to a wish, gift["wish"] =
+    {item_id, listed, reserved_by, purchased, purchased_by, in_sync}."""
+    state = current(con)
+    tab = people.get_person(con, person_id)["wishlist_person_id"]
+    by_id = {it["id"]: it for p in state["people"] for it in p["items"]}
+    linked_ids = {r[0] for r in con.execute("SELECT wishlist_item_id FROM gifts WHERE wishlist_item_id IS NOT NULL")}
+    items = next((p["items"] for p in state["people"] if p["id"] == tab), []) if tab is not None else []
+    open_, reserved, unmatched, seen = [], [], [], set()
+    for it in items:
+        if it["id"] in linked_ids:
+            continue
+        name, email = _holder(it)
+        if not it["purchased"] and it["reserved_by"] is None:
+            open_.append(_wish_json(it))
+            continue
+        pid = _match(con, name, email)
+        reserved.append({**_wish_json(it), "person_id": pid, "label": name})
+        key = ("email", email) if email else ("name", _norm_name(name)) if name else None
+        if pid is None and key and key not in seen:
+            seen.add(key)
+            unmatched.append({"kind": key[0], "value": key[1], "label": name or email})
+    board["wishlist"] = {"linked": tab is not None, "tab_id": tab, "reachable": state["reachable"],
+                         "fetched_at": state["fetched_at"], "age_seconds": state["age_seconds"],
+                         "tabs": tabs(con, state["people"]), "open": open_, "reserved": reserved, "unmatched": unmatched}
+    for gj in [*board["unassigned"], *(g for grp in board["givers"] for g in grp["gifts"])]:
+        item_id = con.execute("SELECT wishlist_item_id FROM gifts WHERE id = ?", (gj["id"],)).fetchone()[0]
+        if item_id is None:
+            continue
+        it = by_id.get(item_id)
+        gj["wish"] = {"item_id": item_id, "listed": it is not None,
+                      "reserved_by": it["reserved_by"] if it else None, "purchased": bool(it and it["purchased"]),
+                      "purchased_by": it["purchased_by"] if it else None,
+                      "in_sync": bool(it) and _in_sync(it, _expected(con, gj["id"]))}
+
+
+def overview(con, *, max_age: int = MAX_AGE) -> dict:
+    """GET /api/wishlist: whether it answers, the age of the cache, and its tabs with the person linked to each."""
+    state = current(con, max_age=max_age)
+    return {"reachable": state["reachable"], "fetched_at": state["fetched_at"], "age_seconds": state["age_seconds"],
+            "tabs": tabs(con, state["people"])}
+
+
+def add_wish(con, user: dict, occasion_id: int, person_id: int, item_id: int) -> int:
+    """Put an open wish of the person's tab on their board: a gift linked to it with the wish's name, link, store and
+    price, no giver, status idea. Sends nothing (an unassigned gift and an open wish agree); assigning it is the
+    ordinary assign. 404 for a wish that is not on this person's tab in the cache; 409 when it is taken."""
+    occasions.get(con, occasion_id)  # 404
+    person = boards._protected_person(con, person_id)  # 404 for anyone without a board
+    it = item(con, item_id)
+    if it is None or person["wishlist_person_id"] is None or it["tab_id"] != person["wishlist_person_id"]:
+        raise ApiError(404, "No such wish.")
+    if it["purchased"] or it["reserved_by"] is not None:
+        raise ApiError(409, "Someone already has this on the wishlist. Reload.")
+    data = {"occasion_id": occasion_id, "title": it["name"] or "Wish", "recipient_ids": [person_id], "giver_ids": [],
+            "url": it["url"], "store": it["store"], "price": it["price_cents"]}
+    try:
+        return gifts.create(con, user, data, wishlist_item_id=item_id)
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "This wish is already on a board. Reload.") from None
+
+
+# ---------------------------------------------------------------- aliases: a wishlist holder mapped once to a person
+def _alias(row) -> dict:
+    return {"id": row["id"], "kind": row["kind"], "value": row["value"], "person_id": row["person_id"]}
+
+
+def list_aliases(con) -> list[dict]:
+    return [_alias(r) for r in con.execute("SELECT * FROM wishlist_aliases ORDER BY kind, value, id")]
+
+
+def set_alias(con, data: dict) -> tuple[dict, bool]:
+    """{kind: "email" | "name", value, person_id}: create the mapping, or point an existing one at another person.
+    Returns (alias, created)."""
+    kind, value = text(data, "kind"), text(data, "value")
+    if kind not in ("email", "name"):
+        raise ApiError(400, "kind must be email or name.")
+    value = value.lower() if kind == "email" else _norm_name(value)
+    if not value or len(value) > (254 if kind == "email" else LABEL_MAX):
+        raise ApiError(400, "value must be 1 to 254 characters for an email, 80 for a name.")
+    person_id = whole(data, "person_id")
+    if person_id is None or not con.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone():
+        raise ApiError(400, "No such person.")
+    with db.transaction(con):
+        row = con.execute("SELECT id FROM wishlist_aliases WHERE kind = ? AND value = ?", (kind, value)).fetchone()
+        if row:
+            con.execute("UPDATE wishlist_aliases SET person_id = ? WHERE id = ?", (person_id, row["id"]))
+            aid, created = row["id"], False
+        else:
+            aid = con.execute("INSERT INTO wishlist_aliases (kind, value, person_id) VALUES (?, ?, ?)",
+                              (kind, value, person_id)).lastrowid
+            created = True
+    return _alias(con.execute("SELECT * FROM wishlist_aliases WHERE id = ?", (aid,)).fetchone()), created
+
+
+def delete_alias(con, alias_id: int) -> None:
+    if not con.execute("DELETE FROM wishlist_aliases WHERE id = ?", (alias_id,)).rowcount:
+        raise ApiError(404, "No such alias.")

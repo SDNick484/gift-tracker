@@ -20,7 +20,8 @@ import pytest
 
 import settings
 import wishlist
-from conftest import con_rows, mut
+from conftest import auth, con_rows, mut
+from test_privacy import world  # noqa: F401  (a fixture: tests/test_privacy.py's data, for its walk)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 URL = "http://192.0.2.10:8090"        # RFC 5737: never a real host
@@ -470,3 +471,197 @@ def test_the_token_is_in_no_log_line(con, wl, caplog):
     wishlist.refresh(con)
     assert len([r for r in caplog.records if r.name == "tracker.wishlist"]) == 3
     assert TOKEN not in caplog.text and "Bearer" not in caplog.text
+
+
+# ---------------------------------------------------------------- wishes on the board, aliases, the routes
+WISHLIST_ROUTES = [("GET", "/api/wishlist"), ("POST", "/api/wishlist/refresh"), ("GET", "/api/wishlist/aliases"),
+                   ("PUT", "/api/wishlist/aliases"), ("DELETE", "/api/wishlist/aliases/1")]
+
+
+def all_routes(ids):
+    return WISHLIST_ROUTES + [("POST", f"/api/occasions/{ids.o}/board/{ids.kid1}/wishes/11")]
+
+
+def board(client, ids, pid=None):
+    r = client.get(f"/api/occasions/{ids.o}/board/{pid or ids.kid1}", headers=auth())
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()
+
+
+def add(client, ids, item_id, pid=None):
+    return client.post(f"/api/occasions/{ids.o}/board/{pid or ids.kid1}/wishes/{item_id}", json={}, headers=mut())
+
+
+def test_with_the_feature_off_the_board_is_unchanged_and_the_routes_are_404(client, ids, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    assert set(board(client, ids)) == {"person", "unassigned", "givers", "split", "evenness"}
+    missing = client.get("/api/nothing-here", headers=auth()).get_json()
+    for method, path in all_routes(ids):
+        r = client.open(path, method=method, json={}, headers=mut())
+        assert (r.status_code, r.get_json()) == (404, missing), (method, path)
+
+
+def test_the_board_lists_open_wishes_of_the_linked_tab(client, ids, wl, unlock, clock):
+    unlock()
+    unlinked = board(client, ids)["wishlist"]
+    assert unlinked == {"linked": False, "tab_id": None, "reachable": True, "fetched_at": clock.t, "age_seconds": 0,
+                        "tabs": [{"id": 3, "name": "Kid 1", "person_id": None}, {"id": 4, "name": "Kid 2", "person_id": None}],
+                        "open": [], "reserved": [], "unmatched": []}
+    link_tab(client, ids.kid1, 3)
+    wl_block = board(client, ids)["wishlist"]
+    assert (wl_block["linked"], wl_block["tab_id"]) == (True, 3)
+    assert wl_block["tabs"][0] == {"id": 3, "name": "Kid 1", "person_id": ids.kid1}
+    assert wl_block["open"] == [
+        {"id": 11, "name": "Lego set", "url": "https://example.com/lego", "store": "Toy Shop", "price_cents": 4999,
+         "occasion": "Christmas", "secret": False, "reserved_by": None, "purchased": False, "purchased_by": None},
+        {"id": 12, "name": "Paint kit", "url": None, "store": None, "price_cents": 1500, "occasion": None,
+         "secret": False, "reserved_by": None, "purchased": False, "purchased_by": None}]
+    assert len(wl.gets()) == 1  # the second board within a minute used the cache
+    assert client.get("/api/wishlist", headers=auth()).get_json() == {
+        "reachable": True, "fetched_at": clock.t, "age_seconds": 0, "tabs": wl_block["tabs"]}
+
+
+def test_adding_a_wish_makes_a_linked_unassigned_gift_and_sends_nothing(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    link_tab(client, ids.kid2, 4)
+    board(client, ids)
+    r = add(client, ids, 11)
+    assert r.status_code == 201, r.get_json()
+    gift = r.get_json()
+    assert (gift["title"], gift["url"], gift["store"], gift["price_cents"], gift["giver_ids"], gift["recipient_ids"],
+            gift["status"], gift["santa"]) == ("Lego set", "https://example.com/lego", "Toy Shop", 4999, [], [ids.kid1], "idea", False)
+    assert con_rows("SELECT wishlist_item_id FROM gifts WHERE id = ?", gift["id"]) == [(11,)]
+    assert wl.posts() == []
+    brd = board(client, ids)
+    assert [w["id"] for w in brd["wishlist"]["open"]] == [12]
+    [linked] = brd["unassigned"]
+    assert linked["wish"] == {"item_id": 11, "listed": True, "reserved_by": None, "purchased": False,
+                              "purchased_by": None, "in_sync": True}
+    assert (add(client, ids, 11).status_code, add(client, ids, 11).get_json()) == (409, {"error": "This wish is already on a board. Reload."})
+    assert add(client, ids, 21).status_code == 404               # Kid 2's wish, not on Kid 1's tab
+    assert add(client, ids, 999).get_json() == {"error": "No such wish."}
+    assert add(client, ids, 11, pid=ids.jordan).status_code == 404  # no board for an unprotected person
+    wl.item(12).update(reserved_by="Grandma Pat")
+    client.post("/api/wishlist/refresh", json={}, headers=mut())
+    assert add(client, ids, 12).status_code == 409
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(1,)]
+    assert wl.posts() == []
+
+
+def test_a_reservation_made_on_the_wishlist_appears_under_the_matched_person(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    items = wl.feed["people"][0]["items"]
+    items += [wish(13, "Kite", reserved_by="Alex", reserved_by_email="alex@example.com"),
+              wish(14, "Book", reserved_by="Casey C", reserved_by_email="casey@example.com"),
+              wish(15, "Ball", reserved_by="  grandma   PAT "),
+              wish(16, "Drum", purchased=True, purchased_by="Grandma Pat"),
+              wish(17, "Yo-yo", reserved_by="Uncle Rob"),
+              wish(18, "Hat", reserved_by="Uncle Rob"),
+              wish(19, "Map", reserved_by="R", reserved_by_email="rob@example.com")]
+    assert client.put("/api/wishlist/aliases", json={"kind": "email", "value": "Casey@Example.com", "person_id": ids.casey},
+                      headers=mut()).status_code == 201
+    assert client.put("/api/wishlist/aliases", json={"kind": "name", "value": "Grandma Pat", "person_id": ids.riley},
+                      headers=mut()).status_code == 201
+    reserved = board(client, ids)["wishlist"]["reserved"]
+    assert [(w["id"], w["person_id"], w["label"]) for w in reserved] == [
+        (13, ids.alex, "Alex"), (14, ids.casey, "Casey C"), (15, ids.riley, "grandma   PAT"), (16, ids.riley, "Grandma Pat"),
+        (17, None, "Uncle Rob"), (18, None, "Uncle Rob"), (19, None, "R")]
+    assert board(client, ids)["wishlist"]["unmatched"] == [
+        {"kind": "name", "value": "uncle rob", "label": "Uncle Rob"},
+        {"kind": "email", "value": "rob@example.com", "label": "R"}]
+
+
+def test_mapping_a_holder_once_is_remembered(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    wl.feed["people"][0]["items"].append(wish(17, "Yo-yo", reserved_by="Uncle Rob"))
+    put = lambda body: client.put("/api/wishlist/aliases", json=body, headers=mut())  # noqa: E731
+    r = put({"kind": "name", "value": "Uncle Rob", "person_id": ids.jordan})
+    assert (r.status_code, r.get_json()) == (201, {"id": 1, "kind": "name", "value": "uncle rob", "person_id": ids.jordan})
+    r = put({"kind": "name", "value": "UNCLE  rob", "person_id": ids.casey})
+    assert (r.status_code, r.get_json()) == (200, {"id": 1, "kind": "name", "value": "uncle rob", "person_id": ids.casey})
+    assert board(client, ids)["wishlist"]["unmatched"] == []
+    assert board(client, ids)["wishlist"]["reserved"][0]["person_id"] == ids.casey
+    assert client.get("/api/wishlist/aliases", headers=auth()).get_json() == [
+        {"id": 1, "kind": "name", "value": "uncle rob", "person_id": ids.casey}]
+    for bad, msg in (({"kind": "phone", "value": "x", "person_id": ids.casey}, "kind must be email or name."),
+                     ({"kind": "name", "value": "  ", "person_id": ids.casey}, "value must be 1 to 254 characters for an email, 80 for a name."),
+                     ({"kind": "name", "value": "x" * 81, "person_id": ids.casey}, "value must be 1 to 254 characters for an email, 80 for a name."),
+                     ({"kind": "name", "value": "x", "person_id": 999999}, "No such person."),
+                     ({"kind": "name", "value": "x", "person_id": True}, "person_id must be a whole number."),
+                     ({"kind": "name", "value": 5, "person_id": ids.casey}, "value must be text.")):
+        r = put(bad)
+        assert (r.status_code, r.get_json()) == (400, {"error": msg}), bad
+    assert client.delete("/api/wishlist/aliases/1", json={}, headers=mut()).status_code == 200
+    r = client.delete("/api/wishlist/aliases/1", json={}, headers=mut())
+    assert (r.status_code, r.get_json()) == (404, {"error": "No such alias."})
+    assert board(client, ids)["wishlist"]["unmatched"] == [{"kind": "name", "value": "uncle rob", "label": "Uncle Rob"}]
+
+
+def test_the_board_shows_the_cache_and_its_age_when_the_wishlist_is_down(client, ids, wl, unlock, clock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    board(client, ids)
+    clock.advance(120)
+    wl.down = True
+    block = board(client, ids)["wishlist"]
+    assert (block["reachable"], block["fetched_at"], block["age_seconds"]) == (False, clock.t - 120, 120)
+    assert [w["id"] for w in block["open"]] == [11, 12]
+    r = client.post("/api/wishlist/refresh", json={}, headers=mut())
+    assert (r.status_code, r.get_json()["reachable"]) == (200, False)
+    wl.down = False
+    assert client.post("/api/wishlist/refresh", json={}, headers=mut()).get_json()["reachable"] is True
+
+
+def test_a_wishlist_that_never_answered_gives_an_empty_board_block(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    wl.down = True
+    block = board(client, ids)["wishlist"]
+    assert (block["reachable"], block["fetched_at"], block["age_seconds"], block["open"], block["tabs"]) == (False, None, None, [], [])
+
+
+def test_wish_text_is_returned_as_data(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    wl.feed["people"][0]["items"] = [wish(11, "<img src=x onerror=alert(1)>", url="javascript:alert(1)",
+                                          store="</script>")]
+    [w] = board(client, ids)["wishlist"]["open"]
+    assert (w["name"], w["url"], w["store"]) == ("<img src=x onerror=alert(1)>", None, "</script>")
+    gift = add(client, ids, 11).get_json()
+    assert (gift["title"], gift["url"]) == ("<img src=x onerror=alert(1)>", None)
+
+
+def test_every_wishlist_route_needs_the_unlock(client, ids, wl):
+    link_tab(client, ids.kid1, 3)
+    for method, path in all_routes(ids):
+        r = client.open(path, method=method, json={}, headers=mut())
+        assert (r.status_code, r.get_json()) == (423, {"error": "Locked", "locked": True}), (method, path)
+    assert client.get(f"/api/occasions/{ids.o}/board/{ids.kid1}", headers=auth()).status_code == 423
+    assert wl.requests == []
+    assert con_rows("SELECT COUNT(*) FROM wishlist_cache") == [(0,)]
+
+
+def test_the_privacy_walk_passes_with_the_feature_on(client, world, wl, unlock):  # noqa: F811  (the imported fixture)
+    """tests/test_privacy.py's locked walk over every GET, with the link on and a feed full of its markers."""
+    from test_privacy import leaks, walk_gets
+    i = world.ids
+    link_tab(client, i.kid1, 3)
+    wl.feed["people"][0]["items"] += [wish(13, "ZZ-SECRET-WISH", reserved_by="ZZ-SECRET-RESERVER", price=388.88),
+                                      wish(14, "ZZ-SECRET-SANTA-WISH", url="https://example.com/zz-secret")]
+    seen = walk_gets(client, world)
+    for url, body in seen.items():
+        assert not leaks(body), (url, leaks(body))
+    unlock()
+    seen = walk_gets(client, world, query=("",))
+    assert any("ZZ-SECRET-WISH" in t and "ZZ-SECRET-RESERVER" in t for t in seen.values())  # control: the walk reaches it
+
+
+def test_the_wishlist_routes_are_in_the_privacy_walk():
+    from test_privacy import api_rules
+    walked = {r.endpoint for r in api_rules({"GET", "POST", "PUT", "PATCH", "DELETE"})}
+    assert {"wishlist_overview", "wishlist_refresh", "wishlist_add_wish", "wishlist_aliases_list", "wishlist_alias_set",
+            "wishlist_alias_delete"} <= walked

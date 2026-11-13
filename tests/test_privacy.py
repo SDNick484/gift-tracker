@@ -48,6 +48,8 @@ def args(w):
         "location_id": [999999],
         "token_id": [1, 999999],
         "exchange_id": [1, 2, 3, 999999],
+        "item_id": [11, 999999],   # the wishlist link: a wish id in the feed, and one that is not
+        "alias_id": [1, 999999],
         # /api/v1 (bearer tokens only; this walk's Cloudflare identity gets 401 there, tests/test_agent_privacy.py walks it with tokens)
         "gift": [*w.secret, w.visible, 999999],
         "occasion": [i.o],

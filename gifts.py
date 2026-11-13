@@ -147,7 +147,9 @@ def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int]) -> None:
 
 
 # ---------------------------------------------------------------- writing
-def create(con, user: dict, data: dict) -> int:
+def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) -> int:
+    """`wishlist_item_id` links the new gift to a wish (wishlist.add_wish only; never read from a request body). One
+    gift per wish: a second link raises sqlite3.IntegrityError and nothing is created."""
     f = _fields(data, partial=False)
     recipients = _person_ids(con, data, "recipient_ids")
     if not recipients:
@@ -179,6 +181,8 @@ def create(con, user: dict, data: dict) -> int:
         if exchange_id is not None:
             con.execute("UPDATE gifts SET exchange_id = ? WHERE id = ?", (exchange_id, gid))
             exchanges.check_gift(con, gid)  # 400 / 409 roll the gift back
+        if wishlist_item_id is not None:
+            con.execute("UPDATE gifts SET wishlist_item_id = ? WHERE id = ?", (wishlist_item_id, gid))
     return gid
 
 

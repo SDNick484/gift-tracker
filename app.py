@@ -25,6 +25,7 @@ import people
 import school
 import settings
 import tokens
+import wishlist
 from common import ApiError, is_school, json_body, locked
 
 app = Flask(__name__)
@@ -483,7 +484,10 @@ def school_role_add(gift_id):
 @family_only
 @unlock_required
 def person_board(occasion_id, person_id):
-    return jsonify(boards.board(db(), occasion_id, person_id))
+    out = boards.board(db(), occasion_id, person_id)
+    if wishlist.enabled():  # off: the board is exactly what it was
+        wishlist.decorate_board(db(), out, person_id)
+    return jsonify(out)
 
 
 @app.post("/api/gifts/<int:gift_id>/assign")
@@ -624,6 +628,75 @@ def tokens_create():
 @unlock_required
 def tokens_revoke(token_id):
     return jsonify(tokens.revoke(db(), token_id))
+
+
+# -- the wishlist link (wishlist.py, docs/wishlist-feed.md). Family only (school mode has none), behind the lock (the
+# wishes are protected people's), and the generic 404 while WISHLIST_URL is unset. The board shows the wishes
+# (person_board above); these routes link a tab, refresh the cache, put a wish on a board and map wishlist holders.
+def wishlist_on(view):
+    """The generic 404 unless the wishlist link is on (wishlist.enabled())."""
+    @functools.wraps(view)
+    def wrapper(*args, **kwargs):
+        if not wishlist.enabled():
+            abort(404)
+        return view(*args, **kwargs)
+    return wrapper
+
+
+@app.get("/api/wishlist")
+@family_only
+@unlock_required
+@wishlist_on
+def wishlist_overview():
+    return jsonify(wishlist.overview(db()))
+
+
+@app.post("/api/wishlist/refresh")
+@family_only
+@unlock_required
+@wishlist_on
+def wishlist_refresh():
+    json_body()
+    wishlist.refresh(db())
+    return jsonify(wishlist.overview(db()))
+
+
+@app.post("/api/occasions/<int:occasion_id>/board/<int:person_id>/wishes/<int:item_id>")
+@family_only
+@unlock_required
+@wishlist_on
+def wishlist_add_wish(occasion_id, person_id, item_id):
+    """Put a wish on the person's board as an unassigned gift linked to it. Nothing is sent to the wishlist."""
+    json_body()
+    gid = wishlist.add_wish(db(), g.user, occasion_id, person_id, item_id)
+    return jsonify(gift_json(visible_gift(gid))), 201
+
+
+@app.get("/api/wishlist/aliases")
+@family_only
+@unlock_required
+@wishlist_on
+def wishlist_aliases_list():
+    return jsonify(wishlist.list_aliases(db()))
+
+
+@app.put("/api/wishlist/aliases")
+@family_only
+@unlock_required
+@wishlist_on
+def wishlist_alias_set():
+    """{kind: email | name, value, person_id}: whoever holds wishes on the wishlist under that email or name is this person."""
+    out, created = wishlist.set_alias(db(), json_body())
+    return jsonify(out), 201 if created else 200
+
+
+@app.delete("/api/wishlist/aliases/<int:alias_id>")
+@family_only
+@unlock_required
+@wishlist_on
+def wishlist_alias_delete(alias_id):
+    wishlist.delete_alias(db(), alias_id)
+    return jsonify(ok=True)
 
 
 # -- the agent API: /api/v1, bearer tokens only (agent_guard). g.token is the caller; g.unlocked is the token's view.
