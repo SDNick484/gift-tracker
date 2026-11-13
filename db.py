@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -112,6 +112,22 @@ def _to_v3(con):
 
 
 MIGRATIONS[3] = _to_v3
+
+
+# Version 4 (agent API): scoped API tokens, of which only a SHA-256 hash is stored, and the note every write by a token
+# leaves on the gift. A token's name stays taken after it is revoked, so the notes never name two tokens alike.
+# `unlocked` marks a `full` token made to see protected gifts (agent.sees_protected).
+def _to_v4(con):
+    con.execute("CREATE TABLE api_tokens (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
+                "scope TEXT NOT NULL CHECK (scope IN ('delivery','shop','full')), token_hash TEXT NOT NULL UNIQUE, "
+                "unlocked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER)")
+    con.execute("CREATE TABLE gift_agent_log (id INTEGER PRIMARY KEY, "
+                "gift_id INTEGER NOT NULL REFERENCES gifts(id) ON DELETE CASCADE, "
+                "token_id INTEGER NOT NULL REFERENCES api_tokens(id), at INTEGER NOT NULL, action TEXT NOT NULL)")
+    con.execute("CREATE INDEX gift_agent_log_gift ON gift_agent_log(gift_id)")
+
+
+MIGRATIONS[4] = _to_v4
 
 
 def migrate(con):
