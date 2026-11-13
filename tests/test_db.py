@@ -8,7 +8,7 @@ import db
 def test_migrate_creates_every_table(con):
     names = {r["name"] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"meta", "groups", "people", "users", "occasions", "occasion_people", "gifts", "gift_recipients", "gift_givers"} <= names
-    assert con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    assert con.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
 
 
 def test_migrate_is_idempotent(con):
@@ -44,7 +44,7 @@ def _v1_database(path):
 def test_a_v1_database_migrates_to_v2_keeping_its_rows(tmp_path):
     c = _v1_database(tmp_path / "t.db")
     db.migrate(c)
-    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
     assert [tuple(r) for r in c.execute("SELECT id, name, protected, role FROM people ORDER BY id")] == [(1, "Ms. Avery", 0, None), (2, "Mr. Diaz", 1, None)]
     rows = c.execute("SELECT gift_id, person_id, detail, done FROM gift_recipients ORDER BY person_id")
     assert [tuple(r) for r in rows] == [(1, 1, None, 0), (1, 2, None, 0)]
@@ -73,3 +73,87 @@ def test_a_database_newer_than_the_code_is_refused(con):
     con.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(db.SCHEMA_VERSION + 1),))
     with pytest.raises(RuntimeError, match="newer than this code"):
         db.migrate(con)
+
+
+# ---------------------------------------------------------------- version 3: locations, addresses, order fields
+GIFT_V3_COLUMNS = ("seller", "order_number", "ship_to_id", "ship_elsewhere_ok", "eta", "arrived_on", "ordered_by", "location_id")
+
+
+def _v2_database(path):
+    """A database exactly as version 2 left it: a gift for one person, with a detail and a done flag."""
+    c = db.connect(str(path))
+    for stmt in db._statements(db.SCHEMA):
+        c.execute(stmt)
+    db.MIGRATIONS[2](c)
+    c.execute("INSERT INTO meta VALUES ('schema_version', '2')")
+    c.execute("INSERT INTO people (id, name, role) VALUES (1, 'Ms. Avery', 'homeroom')")
+    c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2025', 'christmas', '2025-12-19')")
+    c.execute("INSERT INTO gifts (id, occasion_id, title, status, santa, store, created_by, created_at, updated_at) "
+              "VALUES (1, 1, 'Card', 'given', 1, 'Shop', 'a', 0, 0)")
+    c.execute("INSERT INTO gift_recipients (gift_id, person_id, detail, done) VALUES (1, 1, '$35', 1)")
+    return c
+
+
+def test_a_v2_database_migrates_to_v3_keeping_its_rows(tmp_path):
+    c = _v2_database(tmp_path / "t.db")
+    db.migrate(c)
+    assert db.SCHEMA_VERSION == 3
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "3"
+    row = c.execute(f"SELECT title, status, santa, store, {', '.join(GIFT_V3_COLUMNS)} FROM gifts").fetchone()
+    assert tuple(row) == ("Card", "given", 1, "Shop", None, None, None, 0, None, None, None, None)
+    assert [tuple(r) for r in c.execute("SELECT gift_id, person_id, detail, done FROM gift_recipients")] == [(1, 1, "$35", 1)]
+    assert tuple(c.execute("SELECT name, role FROM people").fetchone()) == ("Ms. Avery", "homeroom")
+    assert [tuple(r) for r in c.execute("SELECT label, is_home FROM addresses")] == [("Home", 1)]
+    assert c.execute("SELECT COUNT(*) FROM locations").fetchone()[0] == 0
+    db.migrate(c)  # safe to run again: still one home address, one version row
+    assert c.execute("SELECT COUNT(*) FROM addresses").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key='schema_version'").fetchone()[0] == 1
+    c.close()
+
+
+def _shape(conn, table):
+    return [(r["name"], r["type"], r["notnull"], r["dflt_value"]) for r in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def test_a_fresh_database_has_the_v3_tables_and_columns(con):
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('locations')")] == ["id", "parent_id", "name", "sort_order"]
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('addresses')")] == ["id", "label", "is_home"]
+    cols = {name: (type_, notnull, default) for name, type_, notnull, default in _shape(con, "gifts")}
+    assert all(c in cols for c in GIFT_V3_COLUMNS)
+    assert cols["ship_elsewhere_ok"] == ("INTEGER", 1, "0")
+    assert cols["eta"] == ("TEXT", 0, None)
+    assert [tuple(r) for r in con.execute("SELECT label, is_home FROM addresses")] == [("Home", 1)]
+
+
+def test_the_migrated_tables_match_a_fresh_database(tmp_path, con):
+    c = _v2_database(tmp_path / "t.db")
+    db.migrate(c)
+    for table in ("gifts", "locations", "addresses"):
+        assert _shape(c, table) == _shape(con, table), table
+    c.close()
+
+
+def test_a_second_home_address_is_refused_by_the_database(con):
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO addresses (label, is_home) VALUES ('Other', 1)")
+    con.execute("INSERT INTO addresses (label, is_home) VALUES ('Other', 0)")
+    con.execute("INSERT INTO addresses (label, is_home) VALUES ('Another', 0)")
+
+
+def _gift_in(con, location_id):
+    con.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'X', 'christmas', '2026-12-25')")
+    con.execute("INSERT INTO gifts (id, occasion_id, title, status, location_id, created_by, created_at, updated_at) "
+                "VALUES (1, 1, 'Camera', 'arrived', ?, 'a', 0, 0)", (location_id,))
+
+
+def test_deleting_a_location_unplaces_its_gifts_and_keeps_them(con):
+    con.execute("INSERT INTO locations (id, name) VALUES (1, 'Garage')")
+    _gift_in(con, 1)
+    con.execute("DELETE FROM locations WHERE id = 1")
+    assert [tuple(r) for r in con.execute("SELECT title, location_id FROM gifts")] == [("Camera", None)]
+
+
+def test_deleting_a_location_deletes_its_sub_locations(con):
+    con.execute("INSERT INTO locations (id, parent_id, name) VALUES (1, NULL, 'Garage'), (2, 1, 'Top shelf'), (3, 2, 'Blue bin')")
+    con.execute("DELETE FROM locations WHERE id = 1")
+    assert con.execute("SELECT COUNT(*) FROM locations").fetchone()[0] == 0

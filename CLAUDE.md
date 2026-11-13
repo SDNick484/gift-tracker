@@ -45,10 +45,20 @@ A second instance of the same code (its own database, subdomain and Access polic
 
 - Ask `common.is_school()`, never a copy of `settings.MODE` taken at import: tests switch the mode with `monkeypatch.setattr(settings, "MODE", "school")`.
 - Family mode must not change: a family response gains no key (`mode` on `/api/me` and `role` on a person exist in school mode only), and `role` in a request body is ignored there.
-- A route that exists in one mode only is wrapped in `family_only` or `school_only` (under the route decorator): the other mode answers the generic 404 `{"error": "Not Found"}`. Lock, board and assign are family-only; the four matrix and cell routes are school-only. `tests/test_school.py` pins both lists (`FAMILY_ONLY`, `SCHOOL_ONLY`), so a new mode-specific route is added there.
+- A route that exists in one mode only is wrapped in `family_only` or `school_only` (under the route decorator): the other mode answers the generic 404 `{"error": "Not Found"}`. Lock, board, assign, the four location routes and `/lists/where` are family-only; the four matrix and cell routes are school-only. `tests/test_school.py` pins both lists (`FAMILY_ONLY`, `SCHOOL_ONLY`), so a new mode-specific route is added there.
 - School mode has no lock: `app.unlocked()` is true, so the lock's filtering hides nothing. What must not appear is removed at the edges: `gift_json` drops `santa` and `refuse_locked_write` answers 400 when a body names it; `people._person` reports `protected: false` and setting it true is 400. A response built any other way must go through those.
 - `gifts.update` changes the recipient set; it must never delete and re-insert `gift_recipients` rows, or every edit of a group gift erases its details.
 - The installer's names and paths come from the block between `# instance-begin` and `# instance-end`, and the service script is the template between `# initd-begin` and `# initd-end`. Nothing else may hard-code `/opt/tracker` or the service name; `tests/test_installer_static.py` pins the default install's names, paths, port and rendered service script.
+
+## After purchase (order fields, hiding places, lists)
+
+Decisions in `docs/superpowers/plans/2026-11-13-after-purchase.md`.
+
+- Order fields (`seller, order_number, ship_to_id, ship_elsewhere_ok, eta, arrived_on`) are written by `orders.update` (or, with a status, `gifts.set_status` / `gifts.update`); a route must not write them inline. The agent API calls the same functions.
+- Marking a gift ordered needs seller, ship-to and eta (`orders.require_ordered`), through `POST /status` and `PATCH` alike. `POST /api/gifts` does not enforce it. `ship_warning` is computed on read, never stored.
+- Exactly one address is home (a partial unique index plus the seeded `Home` row). A location is never its own ancestor (`locations.update` refuses it).
+- Every list and count in `lists.py` filters on `gifts.PROTECTED_SQL`. The location tree and the address list name no gift. Deleting an address or a location answers 409 when a gift uses it, so both deletes require the unlock (a locked caller could otherwise learn that a hidden gift uses it).
+- School mode has no hiding places: gift JSON drops `location_id` and `location_path`, a body naming `location_id` is 400, the lists drop the location keys. Order fields, addresses, `/lists/pending`, `/lists/to-wrap` and `/lists/counts` work in both modes.
 
 ## File structure
 
@@ -64,6 +74,11 @@ occasions.py      occasions, per-person plan, carry-forward (copy_from), current
 gifts.py          gift CRUD, tracks (ours/theirs), status, Santa rule, history, visibility (PROTECTED_SQL)
 budgets.py        spent/planned totals, occasion summary
 boards.py         a protected person's board, assign, list text
+school.py         school mode: the staff-by-gift matrix, per-recipient detail and done
+orders.py         order fields, the ship-to check, the one writer (update), ship_warning
+addresses.py      ship-to addresses, exactly one home
+locations.py      the hiding-place tree, the ancestor rule, set_gift_location
+lists.py          Not here yet, To wrap, Where is it?, and the home counts
 static/           index.html (GET / fills in APP_NAME), style.css, manifest.json (GET /manifest.json adds the name), icon.svg
 static/js/        ES modules: main (router), core, api, lock and one module per screen
 tests/            conftest.py + one test file per module

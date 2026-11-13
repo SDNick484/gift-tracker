@@ -9,12 +9,15 @@ from urllib.parse import urlparse
 from flask import Flask, abort, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+import addresses
 import boards
 import budgets
 import db as database
 import gifts
 import identity
+import lists
 import lock
+import locations
 import occasions
 import people
 import school
@@ -313,6 +316,8 @@ def gift_json(row):
     out = gifts.to_json(db(), row, unlocked=unlocked())
     if is_school():
         out.pop("santa", None)  # school mode has no Santa, whatever the column says
+        out.pop("location_id", None)  # nor hiding places
+        out.pop("location_path", None)
     return out
 
 
@@ -327,6 +332,8 @@ def refuse_locked_write(data: dict) -> None:
     if is_school():
         if "santa" in data:
             raise ApiError(400, "Santa is not used in school mode.")
+        if "location_id" in data:
+            raise ApiError(400, "Hiding places are not used in school mode.")
         return  # nothing is locked in school mode
     if unlocked():
         return
@@ -355,7 +362,7 @@ def gifts_update(gift_id):
     visible_gift(gift_id)
     data = json_body()
     refuse_locked_write(data)
-    gifts.update(db(), gift_id, data)
+    gifts.update(db(), gift_id, data, actor=g.user["name"])
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
@@ -369,10 +376,11 @@ def gifts_delete(gift_id):
 @app.post("/api/gifts/<int:gift_id>/status")
 def gifts_status(gift_id):
     visible_gift(gift_id)
-    status = json_body().get("status")
+    data = json_body()
+    status = data.get("status")
     if not isinstance(status, str):
         raise ApiError(400, "status must be text.")
-    gifts.set_status(db(), gift_id, status)
+    gifts.set_status(db(), gift_id, status, data, actor=g.user["name"])  # the body may carry order fields
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
@@ -443,6 +451,80 @@ def gifts_assign(gift_id):
     giver_ids, expected = boards.parse_assign(json_body())
     boards.assign(db(), gift_id, giver_ids, expected)
     return jsonify(gift_json(visible_gift(gift_id)))
+
+
+# -- after purchase: ship-to addresses (both modes) and hiding places (family only: school mode has none).
+# Deleting either needs the unlock: "an order ships there" or "something is hidden there" (409) against "deleted"
+# would tell a locked caller that a hidden gift uses it. Neither list says which gifts use what.
+@app.get("/api/addresses")
+def addresses_list():
+    return jsonify(addresses.list_all(db()))
+
+
+@app.post("/api/addresses")
+def addresses_create():
+    return jsonify(addresses.create(db(), json_body())), 201
+
+
+@app.patch("/api/addresses/<int:address_id>")
+def addresses_update(address_id):
+    return jsonify(addresses.update(db(), address_id, json_body()))
+
+
+@app.delete("/api/addresses/<int:address_id>")
+@unlock_required
+def addresses_delete(address_id):
+    addresses.delete(db(), address_id)
+    return jsonify(ok=True)
+
+
+@app.get("/api/locations")
+@family_only
+def locations_list():
+    return jsonify(locations.tree(db()))
+
+
+@app.post("/api/locations")
+@family_only
+def locations_create():
+    return jsonify(locations.create(db(), json_body())), 201
+
+
+@app.patch("/api/locations/<int:location_id>")
+@family_only
+def locations_update(location_id):
+    return jsonify(locations.update(db(), location_id, json_body()))
+
+
+@app.delete("/api/locations/<int:location_id>")
+@family_only
+@unlock_required
+def locations_delete(location_id):
+    locations.delete(db(), location_id)
+    return jsonify(ok=True)
+
+
+# -- after purchase: the working lists. All filter on the lock (gifts.PROTECTED_SQL) inside lists.py; "where" is
+# family only because it is about hiding places.
+@app.get("/api/occasions/<int:occasion_id>/lists/pending")
+def lists_pending(occasion_id):
+    return jsonify(lists.pending(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.get("/api/occasions/<int:occasion_id>/lists/to-wrap")
+def lists_to_wrap(occasion_id):
+    return jsonify(lists.to_wrap(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.get("/api/occasions/<int:occasion_id>/lists/where")
+@family_only
+def lists_where(occasion_id):
+    return jsonify(lists.where(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.get("/api/occasions/<int:occasion_id>/lists/counts")
+def lists_counts(occasion_id):
+    return jsonify(lists.counts(db(), occasion_id, unlocked=unlocked()))
 
 
 init_db()

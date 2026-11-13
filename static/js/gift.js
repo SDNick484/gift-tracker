@@ -3,8 +3,9 @@
 // Status and Santa apply the moment they are tapped; the fields below save together.
 import { get, send } from "./api.js";
 import {
-  centsToText, esc, giverLabel, isUnlocked, money, renderChecked, renderDisabled, state, statusSteps, toast,
+  centsToText, esc, giverLabel, isUnlocked, money, renderChecked, renderDisabled, renderOptions, state, statusSteps, toast,
 } from "./core.js";
+import { isSchool } from "./mode.js";
 
 // Santa is only for a gift from an owner, and only visible to an unlocked request (the key is absent otherwise).
 export function canSanta(gift, people) {
@@ -30,6 +31,64 @@ export function buildPatch(f) {
   };
 }
 
+// ---------------------------------------------------------------- order card (seller, ship-to, dates, hiding place)
+const idOrNull = v => (v === "" || v === null || v === undefined ? null : Number(v));
+const orderFields = f => ({
+  seller: (f.seller ?? "").trim(), order_number: (f.order_number ?? "").trim(), ship_to_id: idOrNull(f.ship_to_id),
+  ship_elsewhere_ok: Boolean(f.ship_elsewhere_ok), eta: f.eta ?? "", arrived_on: f.arrived_on ?? "",
+});
+
+// The PATCH body for the order card. The hiding place is left out in school mode (the server refuses it there).
+export function orderPayload(f, school = false) {
+  const body = orderFields(f);
+  if (!school) body.location_id = idOrNull(f.location_id);
+  return body;
+}
+
+// The POST /status body. Ordered carries the form's order fields (the server needs seller, ship-to and date, from
+// here or already saved); arrived carries them so the arrival date can be typed; anything else is the status alone.
+export function statusBody(status, f, school = false) {
+  if (!f || (status !== "ordered" && status !== "arrived")) return { status };
+  const { location_id: _place, ...fields } = orderPayload(f, school);
+  return { status, ...fields };
+}
+
+const addressLabel = (addresses, id) => addresses.find(a => a.id === id)?.label ?? "";
+export const addressChoices = addresses => [{ value: "", label: "Pick an address" },
+  ...addresses.map(a => ({ value: a.id, label: a.is_home ? `${a.label} (home)` : a.label }))];
+export const locationChoices = locations => [{ value: "", label: "Not hidden yet" }, ...locations.map(l => ({ value: l.id, label: l.path }))];
+
+const renderShipWarning = (gift, addresses) => (gift.ship_warning
+  ? `<p class="warn-note" role="alert">Ships to ${esc(addressLabel(addresses, gift.ship_to_id))}, not home. Cancel or change it while you still can, or tick "Meant to ship there".</p>`
+  : "");
+const renderOrderedBy = gift => (gift.ordered_by ? `<p class="muted small">Ordered by ${esc(gift.ordered_by)}</p>` : "");
+const renderLocationField = (gift, locations, school) => (school ? "" : `<label class="field"><span>Hidden</span><select name="location_id">${renderOptions(locationChoices(locations), gift.location_id)}</select></label>`);
+
+export const renderOrder = (gift, addresses, locations, school) => `
+  <form id="order" class="card fields"><h3>Bought</h3>
+    <div class="two">
+      <label class="field"><span>Seller</span><input name="seller" type="text" maxlength="200" value="${esc(gift.seller ?? "")}"></label>
+      <label class="field"><span>Order number</span><input name="order_number" type="text" maxlength="100" value="${esc(gift.order_number ?? "")}"></label>
+    </div>
+    <label class="field"><span>Ship to</span><select name="ship_to_id">${renderOptions(addressChoices(addresses), gift.ship_to_id)}</select></label>
+    <label class="check"><input type="checkbox" name="ship_elsewhere_ok"${renderChecked(gift.ship_elsewhere_ok)}> Meant to ship there <span class="muted small">(no warning)</span></label>
+    ${renderShipWarning(gift, addresses)}
+    <div class="two">
+      <label class="field"><span>Expected</span><input name="eta" type="date" value="${esc(gift.eta ?? "")}"></label>
+      <label class="field"><span>Arrived</span><input name="arrived_on" type="date" value="${esc(gift.arrived_on ?? "")}"></label>
+    </div>
+    ${renderLocationField(gift, locations, school)}
+    ${renderOrderedBy(gift)}
+    <p class="form-error" id="orderError" role="alert"></p>
+    <div class="actions"><button class="btn primary" type="submit">Save order details</button></div>
+  </form>`;
+
+// The order card is for gifts from an owner (a gift someone else gives is never ordered by us) and only when the
+// caller supplied the addresses and places.
+export const renderOrderBox = (gift, places) => (places && gift.track === "ours"
+  ? renderOrder(gift, places.addresses, places.locations, places.school)
+  : "");
+
 export function stepClass(index, current) {
   return index < current ? "step done" : "step";
 }
@@ -49,7 +108,7 @@ const renderSantaBox = gift => (typeof gift.santa === "boolean"
   ? `<label class="check"><input type="checkbox" id="santa"${renderChecked(gift.santa)}${renderDisabled(!gift.canSanta)}> From Santa <span class="muted small">(a gift from us only)</span></label>`
   : "");
 
-export function renderPage(gift, people, occasionName, unlocked) {
+export function renderPage(gift, people, occasionName, unlocked, places = null) {
   const view = { ...gift, canSanta: canSanta(gift, people) };
   const recipients = pickList(people, gift.recipient_ids, { unlocked, recipients: true });
   const givers = pickList(people, gift.giver_ids, { unlocked, recipients: false });
@@ -67,6 +126,7 @@ export function renderPage(gift, people, occasionName, unlocked) {
         <div id="santaBox">${renderSantaBox(view)}</div>
         <p class="form-error" id="statusError" role="alert"></p>
       </section>
+      <div id="orderBox">${renderOrderBox(gift, places)}</div>
     </div>
     <div class="col">
       <form id="fields" class="card fields">
@@ -93,9 +153,11 @@ const checked = (form, name) => [...form.querySelectorAll(`input[name="${name}"]
 
 export async function render(ctx) {
   const { view } = ctx;
-  let gift;
+  let gift, addresses, locations;
+  const school = isSchool(state.me);
   try {
-    gift = await get(`/api/gifts/${Number(ctx.parts[1])}`);
+    [gift, addresses, locations] = await Promise.all([get(`/api/gifts/${Number(ctx.parts[1])}`), get("/api/addresses"),
+      school ? Promise.resolve([]) : get("/api/locations")]);
   } catch (e) {
     if (e.status !== 404) throw e;
     view.innerHTML = renderNotFound();
@@ -103,8 +165,25 @@ export async function render(ctx) {
   }
   if (!ctx.alive()) return;
   const occasionName = state.occasions.find(o => o.id === gift.occasion_id)?.name ?? "";
-  view.innerHTML = renderPage(gift, state.people, occasionName, isUnlocked());
+  const places = { addresses, locations, school };
+  view.innerHTML = renderPage(gift, state.people, occasionName, isUnlocked(), places);
   const people = state.people;
+
+  const orderBox = view.querySelector("#orderBox");
+  const orderValues = () => {
+    const form = view.querySelector("#order");
+    if (!form) return null; // a gift someone else gives has no order card
+    const el = form.elements;
+    return { seller: el.seller.value, order_number: el.order_number.value, ship_to_id: el.ship_to_id.value,
+      ship_elsewhere_ok: el.ship_elsewhere_ok.checked, eta: el.eta.value, arrived_on: el.arrived_on.value,
+      location_id: el.location_id?.value ?? "" };
+  };
+  const refreshOrder = g => {
+    const keep = view.querySelector("#order")?.elements.location_id?.value; // an unsaved pick of the hiding place
+    orderBox.innerHTML = renderOrderBox(g, places);
+    const select = view.querySelector("#order")?.elements.location_id;
+    if (select && keep !== undefined && g.location_id === null) select.value = keep;
+  };
 
   const refreshStatus = g => {
     gift = g;
@@ -119,7 +198,9 @@ export async function render(ctx) {
     if (!status || status === gift.status) return;
     statusError.textContent = "";
     try {
-      refreshStatus(await send("POST", `/api/gifts/${gift.id}/status`, { status }));
+      const updated = await send("POST", `/api/gifts/${gift.id}/status`, statusBody(status, orderValues(), school));
+      refreshStatus(updated);
+      if (status === "ordered" || status === "arrived") refreshOrder(updated); // ordered_by, the arrival date
     } catch (err) {
       statusError.textContent = err.message;
     }
@@ -134,6 +215,21 @@ export async function render(ctx) {
       e.target.checked = !e.target.checked;
       statusError.textContent = err.locked ? "Locked. Unlock to change Santa." : err.message;
     }
+  });
+
+  orderBox.addEventListener("submit", async e => {
+    e.preventDefault();
+    const error = view.querySelector("#orderError");
+    error.textContent = "";
+    try {
+      gift = await send("PATCH", `/api/gifts/${gift.id}`, orderPayload(orderValues(), school));
+    } catch (err) {
+      error.textContent = err.locked ? "Locked. Unlock, then save again." : err.message;
+      return;
+    }
+    refreshOrder(gift);
+    refreshStatus(gift);
+    toast("Saved");
   });
 
   const form = view.querySelector("#fields");

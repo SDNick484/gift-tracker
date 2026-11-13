@@ -44,6 +44,8 @@ def args(w):
         "occasion_id": [i.o],
         "person_id": [i.kid1, i.kid2, i.kid3, i.jordan, i.casey, i.alex],
         "group_id": [w.group],
+        "address_id": [*(r[0] for r in con_rows("SELECT id FROM addresses ORDER BY id")), 999999],
+        "location_id": [999999],
     }
 
 

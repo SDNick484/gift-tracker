@@ -248,3 +248,16 @@ button.row { width: 100%; text-align: left; cursor: pointer; font: inherit; colo
 .cell.on { border-style: solid; border-color: var(--accent); color: var(--accent); }
 .cell.done { border-style: solid; border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
 .cell.has-detail::after { content: ""; position: absolute; top: 4px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--gold); }
+
+/* after purchase: the counts on home, the list tabs, overdue and ship-to warnings */
+.counts { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; margin: 0; }
+.counts a { text-decoration: none; font-weight: 600; padding: 4px 0; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 8px 14px; min-height: 40px;
+  display: inline-flex; align-items: center; text-decoration: none; font-weight: 600; font-size: .9rem; color: var(--muted);
+}
+.tab[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.row.overdue { border-color: var(--berry); background: color-mix(in srgb, var(--berry) 8%, var(--surface)); }
+.badge.overdue, .badge.warn { color: var(--berry); border-color: currentColor; }
+.warn-note { color: var(--berry); font-weight: 600; margin: 0; }

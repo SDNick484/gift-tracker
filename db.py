@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -92,6 +92,26 @@ def _to_v2(con):
 
 
 MIGRATIONS[2] = _to_v2
+
+
+# Version 3 (after purchase): the location tree for hiding places, the ship-to addresses (exactly one is home: a
+# partial unique index allows at most one, and the migration seeds it), and the order fields and hiding place on a
+# gift. Columns only on gifts, so existing rows keep their data and take the defaults. A column with a REFERENCES
+# clause must default to NULL, which these do.
+def _to_v3(con):
+    con.execute("CREATE TABLE locations (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES locations(id) "
+                "ON DELETE CASCADE, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0)")
+    con.execute("CREATE INDEX locations_parent ON locations(parent_id)")
+    con.execute("CREATE TABLE addresses (id INTEGER PRIMARY KEY, label TEXT NOT NULL, is_home INTEGER NOT NULL DEFAULT 0)")
+    con.execute("CREATE UNIQUE INDEX addresses_one_home ON addresses(is_home) WHERE is_home = 1")
+    con.execute("INSERT INTO addresses (label, is_home) VALUES ('Home', 1)")
+    for column in ("seller TEXT", "order_number TEXT", "ship_to_id INTEGER REFERENCES addresses(id)",
+                   "ship_elsewhere_ok INTEGER NOT NULL DEFAULT 0", "eta TEXT", "arrived_on TEXT", "ordered_by TEXT",
+                   "location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL"):
+        con.execute(f"ALTER TABLE gifts ADD COLUMN {column}")
+
+
+MIGRATIONS[3] = _to_v3
 
 
 def migrate(con):

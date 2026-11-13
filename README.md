@@ -16,7 +16,7 @@ DEV_EMAIL=alex@example.com ALLOWED_EMAILS=alex@example.com,sam@example.com \
 
 `DEV_EMAIL` admits requests from loopback that carry no Cloudflare headers, as that user. It is for development only and is never set on the server. Settings are documented at the top of `settings.py`. Add `MODE=school` (and a separate `DATA_DIR`) to try the school instance described under Deployment.
 
-The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/settings`).
+The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/lists/<pending|to-wrap|where>`, `#/places`, `#/settings`).
 
 Tests and lint:
 
@@ -29,6 +29,12 @@ node --test tests/frontend.test.mjs
 ```sh
 shellcheck -s sh installer/setup-head.sh installer/build.sh ops/tracker-backup
 ```
+
+## After purchase
+
+A gift from us moves `decided` to `ordered` to `arrived` to `wrapped`. Marking it ordered asks for the seller, a ship-to address and the expected date; an address other than Home shows a warning on the gift until you tick "Meant to ship there", so an order headed to the wrong house is caught while it can still be cancelled. Addresses are labels (Home, a relative's house), not street addresses, and exactly one is home. Settings links to the Places screen, where you keep the addresses and a tree of hiding places (Garage, Top shelf, Blue bin).
+
+Three lists, linked from the home screen with their counts: Not here yet (ordered, by expected date, red when overdue), To wrap (arrived, by recipient, with the hiding place) and Where is it? (arrived or wrapped, by hiding place). While the app is locked, a gift for a protected person is in none of them. In a school instance there are no hiding places and no Where is it? list.
 
 ## Deployment
 

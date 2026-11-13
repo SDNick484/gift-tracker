@@ -190,6 +190,7 @@ export const renderSettings = d => `
         <ul class="rows">${renderHouseholdRows(d.households)}</ul>
       </section>
       ${renderPinSection(d)}
+      <p class="muted small"><a href="#/places">Addresses and hiding places</a></p>
       <p class="muted small"><a href="/cdn-cgi/access/logout">Sign out</a></p>
     </div>
   </div>`;
