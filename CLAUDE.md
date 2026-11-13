@@ -23,7 +23,7 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
 
 ## Changes together
 
-- A new top-level Python module is added to `installer/build.sh`'s copy list (once that file exists).
+- A new top-level Python module needs no installer edit: `installer/build.sh` ships every top-level `*.py` by glob, and `tests/test_installer_static.py` checks the built payload.
 - A new setting goes in `settings.py`, `.env.example` and the installer's settings list.
 - A schema change bumps `db.SCHEMA_VERSION` and adds a step to `db.MIGRATIONS` (which `migrate()` runs).
 - A new `/api/` GET route must pass `tests/test_privacy.py` (once that exists).
@@ -73,6 +73,7 @@ Run before every commit; all of it must pass:
 
 ```sh
 python -m pytest -q && ruff check && for f in static/js/*.js; do node --check "$f"; done
+shellcheck -s sh installer/setup-head.sh installer/build.sh ops/tracker-backup
 ```
 
-(The `node --check` loop applies once `static/js` exists.) CI (`.github/workflows/ci.yml`) runs pytest on Python 3.12 and the latest Python, pytest on Alpine's `py3-*` packages, `ruff check`, and `node --check`.
+(The `node --check` loop applies once `static/js` exists.) CI (`.github/workflows/ci.yml`) runs pytest on Python 3.12 and the latest Python, pytest on Alpine's `py3-*` packages, `ruff check`, `node --check` and `shellcheck -s sh`. The backup tests need the `sqlite3` CLI and skip without it; the Alpine job installs it.

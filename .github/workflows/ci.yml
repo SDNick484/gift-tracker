@@ -49,6 +49,14 @@ jobs:
           node --version
           for f in static/js/*.js; do node --check "$f"; done
 
+  shellcheck:
+    name: shellcheck (sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # ubuntu-latest ships shellcheck.
+      - run: shellcheck -s sh installer/setup-head.sh installer/build.sh ops/tracker-backup
+
   alpine:
     # The container runs on Alpine's own py3-* packages, so test against exactly those.
     name: pytest (Alpine packages)
@@ -56,6 +64,6 @@ jobs:
     container: alpine:latest
     steps:
       # git so actions/checkout makes a real clone: tests/test_hygiene.py lists files with `git ls-files`.
-      - run: apk add --no-cache python3 py3-flask py3-gunicorn py3-jwt py3-cryptography py3-pytest git
+      - run: apk add --no-cache python3 py3-flask py3-gunicorn py3-jwt py3-cryptography py3-pytest git sqlite
       - uses: actions/checkout@v7
       - run: python3 -m pytest -q
