@@ -5,6 +5,8 @@ from datetime import date
 
 from flask import request
 
+import settings
+
 
 class ApiError(Exception):
     """Raised anywhere while handling a request; app.py turns it into {"error": message} with this status."""
@@ -14,6 +16,11 @@ class ApiError(Exception):
         self.status = status
         self.message = message
         self.extra = extra  # more keys for the JSON body, e.g. locked=True
+
+
+def is_school() -> bool:
+    """Whether this instance runs in school mode. Read from settings at call time, so a test can switch it."""
+    return settings.MODE == "school"
 
 
 def locked() -> ApiError:

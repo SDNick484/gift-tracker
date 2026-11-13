@@ -75,6 +75,7 @@ add_setting "$CONF" CF_TEAM_DOMAIN "${CF_TEAM_DOMAIN:-}" "Cloudflare team domain
 add_setting "$CONF" CF_AUD "${CF_AUD:-}" "AUD tag of the tracker's own Access application (not the wishlist's)"
 add_setting "$CONF" APP_NAME "${APP_NAME:-Ledger}" "Page title and home-screen name. Keep it neutral."
 add_setting "$CONF" LOCK_IDLE_SECONDS "${LOCK_IDLE_SECONDS:-300}" "Idle seconds before the protected boards lock"
+add_setting "$CONF" MODE "${MODE:-family}" "family (the default) or school: school makes this the staff-gift tracker, with no lock, no Santa and no boards"
 # Holds the household's emails, so root only: OpenRC runs as root and gives the service what it needs.
 chmod 600 "$CONF"; chown root:root "$CONF"
 
@@ -98,7 +99,7 @@ start_pre() {
   : ${TRACKER_PORT:=8767}
   command_args="--preload --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:${TRACKER_PORT} --chdir /opt/tracker --error-logfile /var/log/tracker.log app:app"
   export HOME=/var/lib/tracker DATA_DIR=/var/lib/tracker
-  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS
+  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE
   checkpath -f -o tracker:tracker -m 0640 /var/log/tracker.log
 }
 EOF
