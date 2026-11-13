@@ -140,7 +140,44 @@ def ids(client):
     return types.SimpleNamespace(**out)
 
 
+PIN = "4821"
+
+
+def set_pin(client, pin=PIN, email="alex@example.com", current=None):
+    """Set (or, with current, change) `email`'s PIN through the API. Setting a PIN does not unlock."""
+    body = {"pin": pin} if current is None else {"pin": pin, "current": current}
+    return _ok(client.post("/api/lock/pin", json=body, headers=mut(email)), 200)
+
+
+def mk_protected_gift(ids, title="ZZ-SECRET-GIFT", to=None, frm=None, **fields):
+    """A gift for a protected person, inserted directly through gifts.create so the lock is not in the way.
+    Defaults to kid1 from alex. Returns the id."""
+    import gifts
+    c = db.connect(settings.DB_PATH)
+    try:
+        data = {"occasion_id": ids.o, "title": title, "recipient_ids": list(to or [ids.kid1]),
+                "giver_ids": list(frm if frm is not None else [ids.alex]), **fields}
+        return gifts.create(c, {"email": "alex@example.com", "name": "Alex"}, data)
+    finally:
+        c.close()
+
+
 @pytest.fixture
-def unlock():
-    """Task 7 makes this open the idle lock. Until the lock exists every request is unlocked, so it does nothing."""
-    return lambda: None
+def unlock(client):
+    """unlock() sets a PIN for the user if they have none and opens the idle lock in this test's client."""
+    def do(email="alex@example.com"):
+        if not client.get("/api/me", headers=auth(email)).get_json()["has_pin"]:
+            set_pin(client, PIN, email)
+        _ok(client.post("/api/lock/unlock", json={"pin": PIN}, headers=mut(email)), 200)
+    return do
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Freezes common.now() (seconds) at a fixed instant; clock.advance(n) moves it on. The unlock cookie's age
+    and the PIN lock-out both read common.now()."""
+    import common
+    state = types.SimpleNamespace(t=1_800_000_000)
+    state.advance = lambda seconds: setattr(state, "t", state.t + seconds)
+    monkeypatch.setattr(common, "now", lambda: state.t)
+    return state
