@@ -16,6 +16,7 @@ for f in *.py; do
   cp "$f" "$STAGE/tracker/"
 done
 [ -d static ] && cp -r static "$STAGE/tracker/static"
+[ -f requirements-mcp.txt ] && cp requirements-mcp.txt "$STAGE/tracker/"  # the MCP service's venv is built from it
 [ -f ops/tracker-backup ] || { echo "ops/tracker-backup is missing."; exit 1; }
 mkdir -p "$STAGE/tracker/ops" && cp ops/tracker-backup "$STAGE/tracker/ops/"
 
@@ -26,7 +27,8 @@ find "$STAGE" \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} \; 
 DEFAULTS="$STAGE/defaults"
 : > "$DEFAULTS"
 if [ -f "$ENV_FILE" ]; then
-  for key in ALLOWED_EMAILS USERS APP_NAME CF_TEAM_DOMAIN CF_AUD MODE; do
+  # The MCP service's household values too; never its token, which is made in the app after the install.
+  for key in ALLOWED_EMAILS USERS APP_NAME CF_TEAM_DOMAIN CF_AUD MODE MCP_PUBLIC_HOSTS CF_ACCESS_AUD MCP_ALLOWED_EMAILS; do
     val=$(sed -n "s/^$key=//p" "$ENV_FILE" | head -n1 | sed "s/^[\"']//;s/[\"']\$//")
     if printf '%s' "$val" | grep -q '["`$\\]'; then
       echo "$key in $ENV_FILE contains a character that is not allowed: double quote, backtick, dollar sign or backslash."; exit 1
