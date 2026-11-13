@@ -550,7 +550,7 @@ test("school: the matrix draws staff down, gifts across, a state per cell and a 
 });
 
 test("school: the matrix says so when there is no staff or no gift, and skips role menus with no roles", () => {
-  assert.ok(renderMatrix({ ...MATRIX, staff: [], cells: [] }, []).includes("No staff in this occasion"));
+  assert.ok(renderMatrix({ ...MATRIX, staff: [], cells: [] }, []).includes("No staff yet"));
   const noGifts = renderMatrix({ ...MATRIX, gifts: [], cells: [] }, []);
   assert.ok(noGifts.includes("No gifts yet") && noGifts.includes("<table"));
   assert.ok(!renderMatrix(MATRIX, []).includes("role-add"));
@@ -701,7 +701,7 @@ test("school screen: the role menu posts the role and the add-gift form posts a 
 test("school screen: a new occasion with no staff, and no occasion at all, draw a notice", async () => {
   const h = schoolHarness(() => [200, { ...MATRIX, staff: [], gifts: [], cells: [] }]);
   await renderSchoolScreen(h.ctx);
-  assert.ok(h.view.innerHTML.includes("No staff in this occasion"));
+  assert.ok(h.view.innerHTML.includes("No staff yet"));
   state.occasionId = null;
   const none = { innerHTML: "" };
   await renderSchoolScreen({ view: none, alive: () => true });

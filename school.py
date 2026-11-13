@@ -31,8 +31,10 @@ def _touch(con, gift_id: int) -> None:
 # ---------------------------------------------------------------- the matrix
 def matrix(con, occasion_id: int, *, unlocked: bool) -> dict:
     """One occasion as a grid. `gifts` are the columns (by id), `staff` the rows (by sort_order, id) and `cells`
-    the ticks (by gift, then person). Rows: everyone in the occasion with a plan other than skip, plus anyone who
-    receives one of its gifts, skipped or not. A column's counts are over all its recipients."""
+    the ticks (by gift, then person). Rows: everyone who receives one of the occasion's gifts; anyone in the
+    occasion with a plan other than skip (inactive staff included: they were in it); and every other active person
+    who is not an owner and not skipped, so a teacher added in Settings is in the grid at once. A column's counts
+    are over all its recipients."""
     occ = occasions.get(con, occasion_id)
     columns = con.execute(
         "SELECT g.id, g.title, g.status, COUNT(r.person_id) AS recipient_count, COALESCE(SUM(r.done), 0) AS done_count "
@@ -43,8 +45,16 @@ def matrix(con, occasion_id: int, *, unlocked: bool) -> dict:
         "SELECT r.gift_id, r.person_id, r.detail, r.done FROM gift_recipients r JOIN gifts g ON g.id = r.gift_id "
         "WHERE g.occasion_id = ? ORDER BY r.gift_id, r.person_id", (occasion_id,)) if r["gift_id"] in shown]
     plans = {r["person_id"]: r["plan"] for r in con.execute("SELECT person_id, plan FROM occasion_people WHERE occasion_id = ?", (occasion_id,))}
-    wanted = {pid for pid, plan in plans.items() if plan != "skip"} | {c["person_id"] for c in cells}
-    rows = [p for p in people.list_people(con, include_inactive=True) if p["id"] in wanted]
+    has_cell = {c["person_id"] for c in cells}
+
+    def is_row(p):
+        if p["id"] in has_cell:
+            return True
+        plan = plans.get(p["id"])
+        if plan is None:
+            return p["active"] and not p["is_user"]
+        return plan != "skip"
+    rows = [p for p in people.list_people(con, include_inactive=True) if is_row(p)]
     return {"occasion": {"id": occ["id"], "name": occ["name"], "kind": occ["kind"], "date": occ["date"], "archived": bool(occ["archived"])},
             "gifts": [{"id": c["id"], "title": c["title"], "status": c["status"], "recipient_count": c["recipient_count"],
                        "done_count": c["done_count"]} for c in columns],

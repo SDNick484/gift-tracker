@@ -16,9 +16,9 @@
 - School mode has no lock at all. `app.unlocked()` is true for every request, so nothing in the code that filters on the lock hides anything; what must not appear is removed at the edges instead: `santa` is dropped from every gift response and a request that names it is 400, and `people._person` reports `protected: false` for everyone and a request that sets it true is 400. A copied family database with `protected = 1` rows therefore still shows no protected person.
 - School routes: `GET /api/occasions/<oid>/matrix`, `PUT` and `DELETE /api/gifts/<id>/recipients/<pid>`, `POST /api/gifts/<id>/recipients {role}`.
 - A gift always keeps at least one recipient (the core rule): removing the last cell is 409 "delete the gift instead", and the "add gift" form creates a gift with its first recipients in one call.
-- Matrix rows are the occasion's people (plan not `skip`) plus anyone who is a recipient of one of its gifts. Columns are the occasion's gifts by id. Counts are per column: `recipient_count` and `done_count`.
+- Matrix rows: every recipient of one of the occasion's gifts; anyone in the occasion with a plan other than `skip` (inactive staff included); and every other active person who is not an owner and not skipped, so a teacher added in Settings is in the grid at once (a new school instance would otherwise need a plan set on 22 person pages before the grid showed anyone). Columns are the occasion's gifts by id. Counts are per column: `recipient_count` and `done_count`.
 - `gifts.update` must stop deleting and re-inserting recipients, or every edit of a group gift would erase its details.
-- Instance name: `INSTANCE=school sh setup-tracker.sh` or `--instance school`. Without one, every path, the service name, the user and the port are what they are today. With one: service, user and folders `tracker-<name>`, default port 8768.
+- Instance name: `--instance school` or `TRACKER_INSTANCE=school` (not `INSTANCE`, a name other tooling sets). Without one, every path, the service name, the user and the port are what they are today. With one: service, user and folders `tracker-<name>`, default port 8768.
 
 ## Review Focus
 
@@ -55,7 +55,7 @@ README.md, CLAUDE.md  second-instance section, school-mode rules
 ### Task 2: The MODE setting and what it hides
 
 **Files:**
-- Modify: `settings.py`, `common.py`, `people.py`, `app.py`, `.env.example`, `deploy/deploy.env.example`, `installer/setup-head.sh` (settings list and the exported variables only), `installer/build.sh` (bake `MODE`)
+- Modify: `settings.py`, `common.py`, `people.py`, `app.py`, `.gitignore`, `.env.example`, `deploy/deploy.env.example`, `installer/setup-head.sh` (settings list and the exported variables only), `installer/build.sh` (bake `MODE`)
 - Test: `tests/test_school.py` (mode part)
 
 **Interfaces:**
@@ -186,7 +186,7 @@ def test_editing_the_recipients_of_a_group_gift_keeps_detail_and_done(client, sc
 - Consumes: `gifts.get`, `gifts.PROTECTED_SQL`, `occasions.get`, `people.get_person`, `common.text/flag`
 - Produces:
   - `school.matrix(con, occasion_id, *, unlocked) -> dict`:
-    `{"occasion": {id, name, kind, date, archived}, "gifts": [{id, title, status, recipient_count, done_count}], "staff": [{id, name, role, color, active, plan}], "cells": [{gift_id, person_id, detail, done}]}`. `gifts` by id, `staff` by `sort_order, id`, `cells` by `gift_id, person_id`; `done` is a bool, `plan` is `null` for a recipient with no plan in this occasion.
+    `{"occasion": {id, name, kind, date, archived}, "gifts": [{id, title, status, recipient_count, done_count}], "staff": [{id, name, role, color, active, plan}], "cells": [{gift_id, person_id, detail, done}]}`. `gifts` by id, `staff` by `sort_order, id`, `cells` by `gift_id, person_id`; `done` is a bool, `plan` is `null` for a person with no plan in this occasion. Which people are rows: see Decisions.
   - `school.set_cell(con, gift_id, person_id, data) -> tuple[dict, bool]`: adds the recipient when missing (the bool is `True`) or updates it; only the keys present change (`detail`: text up to 200 characters, empty or null clears it; `done`: true or false). Returns `{gift_id, person_id, detail, done, recipient_count, done_count}`. Touches `gifts.updated_at`.
   - `school.remove_cell(con, gift_id, person_id) -> dict`: the column counts after. 404 when that person is not a recipient; 409 `{"error": "A gift needs at least one recipient. Delete the gift instead."}` when it is the only one.
   - `school.add_role(con, gift_id, data) -> dict`: `{"added": [person ids], "recipient_count", "done_count"}`; adds every active person whose role equals `data["role"]` (trimmed, case-insensitive) and is not yet a recipient. `role` missing, not text or empty is 400. A role nobody has adds nobody (200).
@@ -206,7 +206,7 @@ def test_matrix_shape_and_counts(client, school, staff):
     assert [s["name"] for s in m["staff"]] == ["Ms. Avery", "Ms. Blake", "Ms. Chen", "Mr. Diaz", "Ms. Ellis"]
     assert m["staff"][0]["role"] == "homeroom"
 
-def test_rows_are_the_occasions_people_and_every_recipient_but_not_skipped_people(...)
+def test_rows_are_recipients_plus_everyone_active_who_is_not_skipped_or_an_owner(...)
 def test_a_new_occasion_starts_from_the_previous_staff_list(...)   # POST /api/occasions copy_from, then matrix lists them with no cells
 def test_put_adds_then_updates_and_only_changes_the_keys_sent(...)
     assert put({}).status_code == 201; assert put({"done": True}).status_code == 200; assert put({"detail": "x"}).get_json()["done"] is True
@@ -267,18 +267,18 @@ test("school: settings forms show Role and no Protected box in school mode, and 
 ### Task 6: Installer instance name
 
 **Files:**
-- Modify: `installer/setup-head.sh`, `.gitignore`, `tests/test_installer_static.py`
+- Modify: `installer/setup-head.sh`, `tests/test_installer_static.py`
 
 **Interfaces:**
-- The installer accepts `INSTANCE=<name>` or `--instance <name>` (`--instance=<name>`), for install and `--uninstall`. A name is 1 to 16 of `a-z 0-9 -`, not starting with `-`; anything else exits 1. An unknown argument exits 1 (a typo must not install over the default).
+- The installer accepts `TRACKER_INSTANCE=<name>` or `--instance <name>` (`--instance=<name>`), for install and `--uninstall`; the flag wins. A name is 1 to 16 of `a-z 0-9 -`, not starting with `-`; anything else exits 1. An unknown argument exits 1 (a typo must not install over the default).
 - With no name: service `tracker`, user and group `tracker`, `/opt/tracker`, `/var/lib/tracker`, `/var/backups/tracker`, `/etc/conf.d/tracker`, `/etc/init.d/tracker`, `/var/log/tracker.log`, `/etc/periodic/daily/tracker-backup`, default port 8767. With name `school`: the same with `tracker-school` in place of `tracker`, default port 8768, and the daily job is a small wrapper that exports that instance's `DATA_DIR`, `BACKUP_DIR` and `LOG` and runs `/opt/tracker-school/ops/tracker-backup`.
 - The init script is a template rendered with `sed` (markers `# initd-begin` and `# initd-end`), the name and path variables sit between `# instance-begin` and `# instance-end`: the tests run exactly those fragments.
-- `.gitignore`: `deploy/*.env` (a second build's household values stay out of git).
+- `.gitignore` gets `deploy/*.env` in Task 2, where `deploy.env.example` first tells people to make `deploy/school.env`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_default_install_names_and_paths_are_unchanged():           # runs the instance fragment with no INSTANCE
+def test_default_install_names_and_paths_are_unchanged():           # runs the instance fragment with no instance name
     assert vars_ == {"NAME": "tracker", "APP_DIR": "/opt/tracker", "DATA_DIR": "/var/lib/tracker", "BACKUP_DIR": "/var/backups/tracker",
                      "CONF": "/etc/conf.d/tracker", "INITD": "/etc/init.d/tracker", "LOG": "/var/log/tracker.log",
                      "SVC_USER": "tracker", "BACKUP_JOB": "/etc/periodic/daily/tracker-backup", "DEFAULT_PORT": "8767"}
@@ -288,7 +288,7 @@ def test_an_instance_gets_its_own_names_paths_and_port():           # school: tr
     assert set(default_values).isdisjoint(set(school_values)) for the path-like variables
     assert "/opt/tracker-school" in rendered and "/opt/tracker " not in rendered
 @pytest.mark.parametrize("bad", ["Sch", "a b", "-x", "a/b", "a.b", "x" * 17, "../x"]) -> exit 1
-def test_instance_flag_and_environment_agree(): `--instance school`, `--instance=school`, INSTANCE=school give the same names
+def test_instance_flag_and_environment_agree(): `--instance school`, `--instance=school`, TRACKER_INSTANCE=school give the same names
 def test_an_unknown_argument_is_refused(): exit 1 and no variables printed
 def test_installer_still_binds_loopback_only_and_never_writes_dev_email()   # existing tests keep passing
 ```
@@ -301,7 +301,7 @@ def test_installer_still_binds_loopback_only_and_never_writes_dev_email()   # ex
 ### Task 7: Docs
 
 **Files:**
-- Modify: `README.md` (a section "A second instance: school" before "Backups"; the status line), `CLAUDE.md` (a separate "School mode" section)
+- Modify: `README.md` (a section "A second instance: school" before "Backups"; a line in Development), `CLAUDE.md` (a separate "School mode" section)
 
 - [ ] **Step 1:** README: what school mode is, building with `DEPLOY_ENV=deploy/school.env`, `MODE=school ... sh setup-tracker.sh --instance school`, its own Access application, hostname, tunnel to its port, `rc-service tracker-school ...`, backups, uninstall.
 - [ ] **Step 2:** CLAUDE.md: the rules that hold in school mode (no lock, no Santa, no protected; mode-gated routes use `family_only`/`school_only`; family responses gain no key; `gifts.update` keeps recipient rows).

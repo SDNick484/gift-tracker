@@ -271,27 +271,29 @@ def test_matrix_shape_counts_and_order(client, staff):
     assert list(m) == ["occasion", "gifts", "staff", "cells"]
 
 
-def test_rows_are_the_occasions_people_and_every_recipient_but_not_skipped_people(client, staff):
+def test_rows_are_recipients_plus_everyone_active_who_is_not_skipped_or_an_owner(client, staff):
     s = staff
-    put_plan(client, s.o, s.ellis, plan="skip")                      # in the occasion but skipped: no row
-    outsider = mk_person(client, "Ms. Fox", role="homeroom")         # not in the occasion, no gift: no row
-    receiver = mk_person(client, "Mr. Grant", role="assistant")      # no plan, but a recipient: a row
+    put_plan(client, s.o, s.ellis, plan="skip")                      # skipped, no gift: no row
+    newcomer = mk_person(client, "Ms. Fox", role="homeroom")         # added in Settings, in no occasion yet: a row, no plan
+    left = mk_person(client, "Ms. Hall", role="homeroom", active=False)  # inactive and in no occasion: no row
     put_plan(client, s.o, s.diaz, plan="skip")                       # skipped but has a gift: still a row
-    assert cell(client, s.card25, receiver).status_code == 201
+    receiver = mk_person(client, "Mr. Grant", role="assistant", active=False)
+    assert cell(client, s.card25, receiver).status_code == 201       # inactive but a recipient: a row
     m = matrix(client, s.o)
     names = [x["name"] for x in m["staff"]]
-    assert "Ms. Ellis" not in names and "Ms. Fox" not in names
-    assert {"Ms. Avery", "Ms. Blake", "Ms. Chen", "Mr. Diaz", "Mr. Grant"} == set(names)
-    assert next(x for x in m["staff"] if x["id"] == receiver)["plan"] is None
-    assert next(x for x in m["staff"] if x["id"] == s.diaz)["plan"] == "skip"
-    assert outsider not in [x["id"] for x in m["staff"]]
+    assert set(names) == {"Ms. Avery", "Ms. Blake", "Ms. Chen", "Mr. Diaz", "Ms. Fox", "Mr. Grant"}
+    assert "Alex" not in names and "Sam" not in names and left not in [x["id"] for x in m["staff"]]
+    by_id = {x["id"]: x for x in m["staff"]}
+    assert by_id[newcomer]["plan"] is None and by_id[s.diaz]["plan"] == "skip" and by_id[receiver]["active"] is False
 
 
 def test_an_inactive_person_in_the_occasion_is_still_a_row_and_marked_inactive(client, staff):
     s = staff
     client.patch(f"/api/people/{s.ellis}", json={"active": False}, headers=mut())
     row = next(x for x in matrix(client, s.o)["staff"] if x["id"] == s.ellis)
-    assert row["active"] is False
+    assert (row["active"], row["plan"]) == (False, "individual")
+    stranger = mk_person(client, "Ms. Ivy", active=False)
+    assert stranger not in [x["id"] for x in matrix(client, s.o)["staff"]]
 
 
 def test_a_new_occasion_starts_from_the_previous_staff_list(client, staff):

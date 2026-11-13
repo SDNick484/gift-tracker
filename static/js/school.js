@@ -85,7 +85,7 @@ const renderHeads = (gifts, roles) => gifts.map(g => renderColumnHead(g, roles))
 const renderCount = g => `<td>${esc(g.recipient_count)}</td>`;
 const renderCounts = gifts => gifts.map(renderCount).join("");
 
-const renderNoStaff = () => `<p class="empty">No staff in this occasion yet. Add people in <a href="#/settings">Settings</a>, or start a new occasion from the last one.</p>`;
+const renderNoStaff = () => `<p class="empty">No staff yet. Add people in <a href="#/settings">Settings</a>.</p>`;
 const renderNoGifts = () => `<p class="empty">No gifts yet. Add the first one below.</p>`;
 
 const renderGiftsHint = gifts => (gifts.length ? "" : renderNoGifts());
