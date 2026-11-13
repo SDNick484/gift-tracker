@@ -988,6 +988,73 @@ def test_with_the_feature_off_a_linked_gift_is_local_only(client, ids, wl, lego,
 
 
 
+# ---------------------------------------------------------------- school mode, the token, locked writes
+def test_school_mode_has_no_wishlist_even_with_a_url(client, ids, wl, lego, monkeypatch):
+    sent = len(wl.requests)
+    monkeypatch.setattr(settings, "MODE", "school")
+    assert wishlist.enabled() is False
+    missing = client.get("/api/nothing-here", headers=auth()).get_json()
+    for method, path in all_routes(ids) + [("GET", f"/api/occasions/{ids.o}/board/{ids.kid1}"),
+                                           ("POST", f"/api/gifts/{lego}/assign")]:
+        r = client.open(path, method=method, json={}, headers=mut())
+        assert (r.status_code, r.get_json()) == (404, missing), (method, path)
+    # The gift still carries its wish id, but every write of it is local in school mode.
+    assert client.patch(f"/api/gifts/{lego}", json={"giver_ids": [ids.jordan], "title": "Kit"}, headers=mut()).status_code == 200
+    assert status(client, lego, "confirmed").status_code == 200
+    assert client.delete(f"/api/gifts/{lego}", json={}, headers=mut()).status_code == 200
+    assert len(wl.requests) == sent
+
+
+def test_the_token_is_in_no_response_and_no_log_line(client, ids, wl, lego, caplog):
+    caplog.set_level(logging.DEBUG)
+    bodies, codes = [], []
+
+    def call(method, path, body=None):
+        r = client.open(path, method=method, json=body if body is not None else {}, headers=mut() if method != "GET" else auth())
+        bodies.append(r.get_data(as_text=True))
+        codes.append(r.status_code)
+        return r
+    for method, path in all_routes(ids) + [("GET", f"/api/occasions/{ids.o}/board/{ids.kid1}"), ("GET", "/api/me")]:
+        call(method, path)
+    call("POST", f"/api/gifts/{lego}/assign", {"giver_ids": [ids.jordan], "expected_giver_ids": []})
+    wl.status[("POST", "/api/feed/items/11/reserve")] = 409
+    call("POST", f"/api/gifts/{lego}/assign", {"giver_ids": [], "expected_giver_ids": [ids.jordan]})
+    wl.status[("POST", "/api/feed/items/11/reserve")] = 500
+    call("POST", f"/api/gifts/{lego}/assign", {"giver_ids": [], "expected_giver_ids": [ids.jordan]})
+    wl.down = True
+    call("POST", "/api/wishlist/refresh")
+    call("POST", f"/api/gifts/{lego}/status", {"status": "confirmed"})
+    assert {200, 409, 503} <= set(codes)  # successes and both kinds of failure were answered
+    for text_ in bodies:
+        assert TOKEN not in text_ and "Bearer" not in text_
+    assert TOKEN not in caplog.text and "Bearer" not in caplog.text
+    assert "Lego" not in caplog.text and "Kid 1" not in caplog.text  # no wish or person in a log line
+
+
+def test_no_locked_mutation_reaches_the_wishlist(client, world, wl, unlock):  # noqa: F811  (the imported fixture)
+    """tests/test_privacy.py's locked mutation walk, with the link on and a protected gift linked to a wish: nothing
+    protected changes and not one request is sent."""
+    from test_privacy import HOSTILE, _fill, api_rules, leaks, protected_state, urls
+    i = world.ids
+    link_tab(client, i.kid1, 3)
+    c = db.connect(settings.DB_PATH)
+    c.execute("UPDATE gifts SET wishlist_item_id = 11 WHERE id = ?", (world.shared,))
+    c.close()
+    unlock()
+    board(client, i)  # fills the cache
+    client.post("/api/lock/lock", json={}, headers=mut())
+    before, sent = protected_state(), len(wl.requests)
+    for rule in api_rules({"POST", "PUT", "PATCH", "DELETE"}):
+        for method in sorted(rule.methods & {"POST", "PUT", "PATCH", "DELETE"}):
+            for url, values in urls(rule, world):
+                for body in HOSTILE:
+                    r = client.open(url, method=method, json=_fill(body, i), headers=mut())
+                    assert r.status_code < 500, (method, url, r.status_code)
+                    assert not leaks(r.get_data(as_text=True)), (method, url)
+                    assert protected_state() == before, (method, url, body)
+    assert len(wl.requests) == sent
+
+
 # ---------------------------------------------------------------- keep last: every request this file made
 FORBIDDEN = ("santa", "status", "price", "location", "seller", "order", "ship", "eta", "arrived", "note", "agent",
              "token", "giver", "recipient", "gift", "occasion", "budget")
