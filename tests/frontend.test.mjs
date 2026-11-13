@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { ApiError, events, get, send } from "../static/js/api.js";
 import { backTarget, forChoices, fromChoices, render as renderIdeaScreen } from "../static/js/idea.js";
+import { findEntry, giftLine, groupByOccasion, renderPage, totalsText } from "../static/js/person.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
@@ -202,4 +203,45 @@ test("idea: with no occasion there is nothing to save into", async () => {
   const view = { innerHTML: "" };
   await renderIdeaScreen({ view, query: {}, alive: () => true });
   assert.ok(view.innerHTML.includes("Create an occasion first."));
+});
+
+// ---------------------------------------------------------------- person.js
+const people4 = [{ id: 1, name: "Alex", is_user: true }, { id: 2, name: "Sam", is_user: true }, { id: 3, name: "Pat" }, { id: 4, name: "Lee" }];
+const gift = (over = {}) => ({ id: 10, title: "Shoes?", status: "idea", price_cents: 7500, recipient_ids: [3], giver_ids: [1], ...over });
+
+test("person: a gift line says who it is from and who else gets it", () => {
+  assert.deepEqual(giftLine(gift(), people4, 3), { from: "Alex", also: "" });
+  assert.deepEqual(giftLine(gift({ recipient_ids: [3, 4], giver_ids: [1, 2] }), people4, 3), { from: "Us", also: "Lee" });
+  assert.deepEqual(giftLine(gift({ giver_ids: [] }), people4, 3), { from: "", also: "" });
+});
+
+test("person: history groups by occasion, newest first, without the occasion shown above", () => {
+  const h = [
+    { ...gift({ id: 1 }), occasion: { id: 7, name: "Christmas 2025", date: "2025-12-25" } },
+    { ...gift({ id: 2 }), occasion: { id: 7, name: "Christmas 2025", date: "2025-12-25" } },
+    { ...gift({ id: 3 }), occasion: { id: 9, name: "Christmas 2026", date: "2026-12-25" } },
+    { ...gift({ id: 4 }), occasion: { id: 5, name: "Christmas 2024", date: "2024-12-25" } },
+  ];
+  const groups = groupByOccasion(h, 9);
+  assert.deepEqual(groups.map(g => [g.name, g.gifts.map(x => x.id)]), [["Christmas 2025", [1, 2]], ["Christmas 2024", [4]]]);
+});
+
+test("person: totals text and the summary entry lookup", () => {
+  assert.equal(totalsText({ spent_cents: 2999, budget_cents: 7500, planned_cents: 500 }), "Spent $29.99 of $75.00 · $5.00 planned");
+  assert.equal(totalsText({ spent_cents: 0, budget_cents: null, planned_cents: 0 }), "Spent $0.00");
+  assert.equal(totalsText(null), "");
+  const s = { groups: [{ people: [{ id: 3 }] }], protected: { people: [{ id: 8 }] } };
+  assert.deepEqual([findEntry(s, 3).id, findEntry(s, 8).id, findEntry(s, 99)], [3, 8, null]);
+});
+
+test("person: titles, names and notes are escaped, Santa only shows when the server sent it", () => {
+  const evil = gift({ title: `<script>alert(1)</script>`, santa: true });
+  const person = { id: 3, name: `<b>Pat</b>`, color: "#1f4d3a", household: `"x"`, active: false, protected: false };
+  const occasion = { id: 1, name: `<i>Xmas</i>` };
+  const html = renderPage(person, "Side <A>", occasion, { plan: "joint", budget_cents: 7500 }, null, [evil, gift({ id: 11 })], [], people4);
+  assert.ok(!/<script|<b>|<i>/.test(html), html);
+  assert.equal((html.match(/badge santa/g) ?? []).length, 1);
+  assert.ok(html.includes('value="75.00"') && html.includes('<option value="joint" selected>'));
+  assert.ok(html.includes("inactive") && html.includes('data-color="#1f4d3a"') && !html.includes("Board"));
+  assert.ok(renderPage({ ...person, protected: true }, "", occasion, null, null, [], [], people4).includes('href="#/board/3"'));
 });

@@ -201,6 +201,12 @@ def test_the_scanner_itself():
     assert not is_single_safe_call("esc(a) || `<x>`")
 
 
+def test_unquoted_attribute_rule_ignores_query_strings():
+    unquoted = re.compile(r"\s[A-Za-z_:][\w:.-]*=\s*$")
+    assert unquoted.search('<a href=') and unquoted.search('<input value= ')
+    assert not unquoted.search('<a href="#/idea?for=') and not unquoted.search('<a href="x" title="')
+
+
 @pytest.mark.parametrize("path", JS_FILES, ids=os.path.basename)
 def test_every_innerhtml_interpolation_is_escaped(path):
     """Every `${...}` in a template literal that holds markup is one call to esc, money, daysLabel or a function
@@ -212,7 +218,9 @@ def test_every_innerhtml_interpolation_is_escaped(path):
             continue  # not markup: a URL path, a message
         for before, expr in zip(pieces, exprs):
             assert is_single_safe_call(expr), f"{os.path.basename(path)}: unescaped interpolation ${{{expr.strip()}}}"
-            assert not re.search(r"=\s*$", before), f"{os.path.basename(path)}: unquoted attribute before ${{{expr.strip()}}}"
+            # `name=${...}` with no quote: an attribute value that a space or > in the text would break out of
+            assert not re.search(r"\s[A-Za-z_:][\w:.-]*=\s*$", before), \
+                f"{os.path.basename(path)}: unquoted attribute before ${{{expr.strip()}}}"
     for m in re.finditer(r"innerHTML\s*\+?=\s*(?P<rhs>[^;\n]*)", src):
         rhs = m.group("rhs").strip()
         assert rhs.startswith(("`", "render")) or rhs in ('""', "''"), f"{os.path.basename(path)}: innerHTML = {rhs}"

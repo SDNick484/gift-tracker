@@ -1,5 +1,5 @@
 // Shared helpers and the small amount of state every screen reads. No top-level DOM access, so Node can load it.
-import { get } from "./api.js";
+import { ApiError, events, get } from "./api.js";
 
 // ---------------------------------------------------------------- escaping and formatting
 // The regex uses hex escapes for the quote characters so the escaping check in tests/test_frontend.py can scan
@@ -156,6 +156,14 @@ export function currentOccasion() {
 }
 
 export const isUnlocked = () => state.me?.unlocked === true;
+
+// For a screen the server would happily answer while locked (a protected person's page: their gifts are simply
+// filtered out): open the PIN pad and stop drawing. main.js shows a "locked" notice for the thrown error.
+export function requireUnlocked() {
+  if (isUnlocked()) return;
+  events.dispatchEvent(new Event("locked"));
+  throw new ApiError(423, "Locked", { locked: true });
+}
 export const personById = id => state.people.find(p => p.id === id) ?? null;
 export const owners = () => state.people.filter(p => p.is_user);
 
