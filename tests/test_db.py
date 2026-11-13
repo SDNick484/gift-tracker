@@ -317,3 +317,79 @@ def test_deleting_an_occasion_deletes_its_exchanges_draws_and_gifts(con):
     con.execute("DELETE FROM occasions WHERE id = 1")
     for table in ("exchanges", "exchange_draws", "gifts"):
         assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+
+
+# ---------------------------------------------------------------- version 6: the wishlist link
+def _v5_database(path):
+    """A database exactly as version 5 left it: a gift already carrying a wishlist item id (the v1 column)."""
+    c = db.connect(str(path))
+    for stmt in db._statements(db.SCHEMA):
+        c.execute(stmt)
+    for version in (2, 3, 4, 5):
+        db.MIGRATIONS[version](c)
+    c.execute("INSERT INTO meta VALUES ('schema_version', '5')")
+    c.execute("INSERT INTO people (id, name, wishlist_person_id) VALUES (1, 'Kid 1', 3)")
+    c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
+    c.execute("INSERT INTO gifts (id, occasion_id, title, status, wishlist_item_id, created_by, created_at, updated_at) "
+              "VALUES (1, 1, 'Card', 'idea', 7, 'a', 0, 0)")
+    c.execute("INSERT INTO gift_recipients (gift_id, person_id) VALUES (1, 1)")
+    return c
+
+
+def test_a_v5_database_migrates_to_v6_keeping_its_rows(tmp_path):
+    c = _v5_database(tmp_path / "t.db")
+    db.migrate(c)
+    assert db.SCHEMA_VERSION >= 6
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
+    assert tuple(c.execute("SELECT title, wishlist_item_id FROM gifts").fetchone()) == ("Card", 7)
+    assert tuple(c.execute("SELECT name, wishlist_person_id FROM people").fetchone()) == ("Kid 1", 3)
+    assert c.execute("SELECT COUNT(*) FROM wishlist_cache").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM wishlist_aliases").fetchone()[0] == 0
+    db.migrate(c)  # again: nothing changes
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key='schema_version'").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM gifts").fetchone()[0] == 1
+    c.close()
+
+
+def test_a_fresh_database_has_the_v6_tables(con):
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('wishlist_cache')")] == \
+        ["id", "feed", "fetched_at", "failed_at"]
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('wishlist_aliases')")] == \
+        ["id", "kind", "value", "person_id"]
+
+
+def test_the_v6_migrated_tables_match_a_fresh_database(tmp_path, con):
+    c = _v5_database(tmp_path / "t.db")
+    db.migrate(c)
+    for table in ("gifts", "wishlist_cache", "wishlist_aliases"):
+        assert _shape(c, table) == _shape(con, table), table
+    index = "SELECT sql FROM sqlite_master WHERE name = 'gifts_wishlist_item'"
+    assert c.execute(index).fetchone()[0] == con.execute(index).fetchone()[0]
+    c.close()
+
+
+def test_one_gift_per_wish_and_any_number_without_one(con):
+    con.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'X', 'christmas', '2026-12-25')")
+    insert = ("INSERT INTO gifts (occasion_id, title, status, wishlist_item_id, created_by, created_at, updated_at) "
+              "VALUES (1, 'G', 'idea', ?, 'a', 0, 0)")
+    con.execute(insert, (7,))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute(insert, (7,))
+    con.execute(insert, (None,))
+    con.execute(insert, (None,))
+    assert con.execute("SELECT COUNT(*) FROM gifts").fetchone()[0] == 3
+
+
+def test_the_cache_has_one_row_and_aliases_are_unique_and_cascade(con):
+    con.execute("INSERT INTO wishlist_cache (id, feed, fetched_at) VALUES (1, '{}', 0)")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO wishlist_cache (id, feed, fetched_at) VALUES (2, '{}', 0)")
+    con.execute("INSERT INTO people (id, name) VALUES (101, 'Casey')")
+    con.execute("INSERT INTO wishlist_aliases (kind, value, person_id) VALUES ('name', 'grandma pat', 101)")
+    con.execute("INSERT INTO wishlist_aliases (kind, value, person_id) VALUES ('email', 'grandma pat', 101)")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO wishlist_aliases (kind, value, person_id) VALUES ('name', 'grandma pat', 101)")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO wishlist_aliases (kind, value, person_id) VALUES ('phone', 'x', 101)")
+    con.execute("DELETE FROM people WHERE id = 101")
+    assert con.execute("SELECT COUNT(*) FROM wishlist_aliases").fetchone()[0] == 0

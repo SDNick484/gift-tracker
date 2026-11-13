@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -148,6 +148,21 @@ def _to_v5(con):
 
 
 MIGRATIONS[5] = _to_v5
+
+
+# Version 6 (the wishlist link): the last good feed from the Family Wishlist with its fetch time and the time of the
+# last failed fetch (one row); a wishlist email or free-text name mapped once to a person; and one gift per wish (the
+# wishlist_item_id column exists since version 1, but nothing set it before this version).
+def _to_v6(con):
+    con.execute("CREATE TABLE wishlist_cache (id INTEGER PRIMARY KEY CHECK (id = 1), feed TEXT, "
+                "fetched_at INTEGER, failed_at INTEGER)")
+    con.execute("CREATE TABLE wishlist_aliases (id INTEGER PRIMARY KEY, "
+                "kind TEXT NOT NULL CHECK (kind IN ('email','name')), value TEXT NOT NULL, "
+                "person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE, UNIQUE (kind, value))")
+    con.execute("CREATE UNIQUE INDEX gifts_wishlist_item ON gifts(wishlist_item_id) WHERE wishlist_item_id IS NOT NULL")
+
+
+MIGRATIONS[6] = _to_v6
 
 
 def migrate(con):
