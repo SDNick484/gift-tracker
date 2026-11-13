@@ -30,7 +30,24 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
+      # The MCP service's stack (its own venv in production, never the Flask app's), so the MCP tests run here.
+      - run: python -m pip install -r requirements-mcp.txt httpx
       - run: python -m pytest -q
+      # importorskip would otherwise let the MCP tests pass without running.
+      - name: MCP tests ran, none skipped
+        run: |
+          python -m pytest -q -rs --junitxml=mcp.xml tests/test_mcp_server.py tests/test_mcp_http.py
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("mcp.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+          print(f"tests={tests} skipped={skipped}")
+          if tests == 0 or skipped:
+              sys.exit("tests/test_mcp_server.py and tests/test_mcp_http.py must all run; none may be skipped")
+          PY
 
   lint:
     name: ruff, node --check and node --test
@@ -66,6 +83,9 @@ jobs:
     container: alpine:latest
     steps:
       # git so actions/checkout makes a real clone: tests/test_hygiene.py lists files with `git ls-files`.
-      - run: apk add --no-cache python3 py3-flask py3-gunicorn py3-jwt py3-cryptography py3-pytest git sqlite
+      - run: apk add --no-cache python3 py3-flask py3-gunicorn py3-jwt py3-cryptography py3-pytest py3-pip git sqlite
       - uses: actions/checkout@v7
+      # The MCP stack has no Alpine package; the installer gives the MCP service a pip venv. Here it goes beside the
+      # apk packages (as Matinee's CI does) so the MCP tests run too.
+      - run: python3 -m pip install --no-cache-dir --break-system-packages -r requirements-mcp.txt httpx
       - run: python3 -m pytest -q

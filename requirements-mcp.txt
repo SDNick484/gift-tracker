@@ -1,0 +1,5 @@
+# Pins for the MCP service's own venv (/opt/<service>-mcp/venv, built by the installer); the Flask app does not need these.
+# Same pins as Matinee's MCP service.
+mcp>=2.3,<3
+uvicorn>=0.31
+pyjwt[crypto]>=2.10
