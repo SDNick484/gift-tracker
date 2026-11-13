@@ -45,7 +45,7 @@ def get(con, occasion_id: int):
 
 def create(con, name: str, kind: str, date: str, copy_from: int | None) -> int:
     """A new occasion. With copy_from, the plan and budget of every person who is still active are copied from
-    that occasion; no gifts are. Without it the occasion starts with no people."""
+    that occasion, and so are its exchanges (name and budget only); no gifts and no draws are. Without it the occasion starts with no people."""
     if kind not in KINDS:
         raise ApiError(400, f"kind must be one of {', '.join(KINDS)}.")
     date = _date(date)
@@ -59,6 +59,9 @@ def create(con, name: str, kind: str, date: str, copy_from: int | None) -> int:
                 "SELECT ?, op.person_id, op.plan, op.budget_cents FROM occasion_people op "
                 "JOIN people p ON p.id = op.person_id WHERE op.occasion_id = ? AND p.active = 1",
                 (oid, copy_from))
+            # Exchanges carry forward as a name and a budget: no date (it was last year's), no draws, no gifts.
+            con.execute("INSERT INTO exchanges (occasion_id, name, budget_cents) "
+                        "SELECT ?, name, budget_cents FROM exchanges WHERE occasion_id = ? ORDER BY id", (oid, copy_from))
     return oid
 
 

@@ -406,3 +406,37 @@ def test_exchange_gifts_count_in_money_for_unprotected_recipients(client, ids):
     mk_gift(client, ids.o, "Mug", to=[ids.jordan], frm=[ids.alex], exchange_id=ex, price="20")
     jordan = next(p for g in summary(client, ids)["groups"] for p in g["people"] if p["id"] == ids.jordan)
     assert (jordan["planned_cents"], jordan["gift_count"], jordan["headline"]) == (2000, 1, "Mug")
+
+
+# ---------------------------------------------------------------- carry-forward
+def test_copying_an_occasion_copies_exchange_names_and_budgets_only(client, ids, unlock):
+    unlock()
+    ex = mk_exchange(client, ids, name="Secret Santa", budget=2500, date="2026-12-20")
+    mk_exchange(client, ids, name="Favorite Things", budget=None, date=None)
+    put_draw(client, ex, ids.alex, ids.jordan)
+    mk_gift(client, ids.o, "Mug", to=[ids.jordan], frm=[ids.alex], exchange_id=ex)
+    new = post(client, "/api/occasions", {"name": "Christmas 2027", "kind": "christmas", "date": "2027-12-25",
+                                          "copy_from": ids.o}).get_json()["id"]
+    copied = listing(client, ids, occasion=new)
+    assert [(e["name"], e["budget_cents"], e["date"], e["draws"]) for e in copied] == \
+        [("Secret Santa", 2500, None, []), ("Favorite Things", None, None, [])]
+    assert {e["id"] for e in copied}.isdisjoint({e["id"] for e in listing(client, ids)})
+    assert con_rows("SELECT occasion_id, COUNT(*) FROM exchange_draws d JOIN exchanges e ON e.id = d.exchange_id GROUP BY 1") == [(ids.o, 1)]
+    assert con_rows("SELECT COUNT(*) FROM gifts WHERE occasion_id = ?", new) == [(0,)]
+    assert len(listing(client, ids)) == 2                         # the source keeps its exchanges and draws
+    assert len(listing(client, ids)[0]["draws"]) == 1
+
+
+def test_copying_an_occasion_with_no_exchanges_or_without_copy_from_adds_none(client, ids):
+    plain = post(client, "/api/occasions", {"name": "A", "kind": "other", "date": "2027-01-01", "copy_from": ids.o}).get_json()["id"]
+    mk_exchange(client, ids)
+    bare = post(client, "/api/occasions", {"name": "B", "kind": "other", "date": "2027-01-02"}).get_json()["id"]
+    assert listing(client, ids, occasion=plain) == [] and listing(client, ids, occasion=bare) == []
+
+
+def test_copying_never_carries_a_protected_draw(client, ids, world, unlock):
+    new = post(client, "/api/occasions", {"name": "Christmas 2027", "kind": "christmas", "date": "2027-12-25",
+                                          "copy_from": ids.o}).get_json()["id"]
+    unlock()
+    assert [e["draws"] for e in listing(client, ids, occasion=new)] == [[]]
+    assert con_rows("SELECT COUNT(*) FROM exchange_draws") == [(4,)]
