@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8
+# CI-only lint, pinned so a new release cannot turn CI red on its own. Not a runtime dependency.
+ruff==0.17.5
