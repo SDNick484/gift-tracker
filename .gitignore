@@ -1,0 +1,20 @@
+# local data from running the app in development
+data/
+
+# generated installer
+dist/
+
+# household values: copy deploy/deploy.env.example
+deploy/deploy.env
+.env
+
+# real names and hostnames for tests/test_hygiene.py; must never be committed
+tests/hygiene_denylist.txt
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.DS_Store

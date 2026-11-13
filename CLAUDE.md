@@ -1,0 +1,73 @@
+# Gift Tracker: notes for Claude
+
+A private gift planner for two owners: who each gift is for, who it is from, where it stands. Flask + SQLite,
+plain ES-module frontend with no build step, gunicorn under OpenRC on an Alpine LXC, behind a Cloudflare Tunnel and
+its own Cloudflare Access application. The design is `docs/superpowers/specs/2026-11-12-gift-tracker-design.md`;
+the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do not edit either to make code fit.
+
+## Rules that must keep holding
+
+- Runtime dependencies must exist as Alpine `py3-*` packages: `py3-flask py3-gunicorn py3-jwt py3-cryptography`. Prefer the standard library.
+- No frontend framework, bundler or npm step. Native ES modules in `static/js/`.
+- No personal data in the repo: generic names (Alex, Sam, Jordan, Riley, Casey), `example.com` emails, RFC 5737 addresses. Household values live in git-ignored `deploy/deploy.env`. `tests/test_hygiene.py` enforces the emails, plus any strings in the git-ignored `tests/hygiene_denylist.txt`.
+- Identity only from a verified `Cf-Access-Jwt-Assertion` whose email is in `ALLOWED_EMAILS`. No LAN role, ever. The one exception is development: `DEV_EMAIL` set, a loopback remote address, and none of `identity.CF_HEADERS` present. The installer never writes `DEV_EMAIL`.
+- Every mutation needs header `X-Tracker: 1`, a JSON body, and a same-origin `Origin`.
+- Read bodies with `json_body()` and strings with `text(data, key)`; bad shapes return 400. Never store non-finite numbers. Money is integer cents.
+- Everything user-typed goes through `esc()` before `innerHTML`. CSP allows no inline scripts and images only from this origin.
+- No gift title or person name in any `<title>`, the manifest, or a log line. Manifest name and page title are the `APP_NAME` setting, default `Ledger`.
+- Schema changes go through idempotent `migrate()` and bump `SCHEMA_VERSION`. No manual DB step on the host.
+- Family colors are data (`people.color`), not code.
+- Commits: Conventional Commits, one logical change each, author `SDNick484 <SDNick484@users.noreply.github.com>`.
+- Docs use OpenRC commands and say `vim`.
+- Default port `8767`. Gunicorn binds `127.0.0.1` only.
+
+## Changes together
+
+- A new top-level Python module is added to `installer/build.sh`'s copy list (once that file exists).
+- A new setting goes in `settings.py`, `.env.example` and the installer's settings list.
+- A schema change bumps `db.SCHEMA_VERSION` and adds a step to `db.MIGRATIONS` (which `migrate()` runs).
+- A new `/api/` GET route must pass `tests/test_privacy.py` (once that exists).
+
+## File structure
+
+```
+app.py            Flask object, before/after hooks, every route
+settings.py       environment config, read once at import
+db.py             SCHEMA, SCHEMA_VERSION, MIGRATIONS, connect(), transaction(), migrate()
+common.py         json_body, text, parse_cents, ApiError
+identity.py       Cloudflare JWT verification, resolve_user()
+lock.py           PIN hashing, unlock cookie, is_unlocked()
+people.py         groups, people, households, users
+occasions.py      occasions, per-person plan, carry-forward
+gifts.py          gift CRUD, tracks, status, Santa rule, visibility
+budgets.py        spent/planned totals, occasion summary
+boards.py         a protected person's board, assign, list text
+static/           index.html, style.css, manifest.json, icon.svg
+static/js/        ES modules
+tests/            conftest.py + one test file per module
+installer/        setup-head.sh, build.sh
+deploy/           deploy.env.example
+ops/              tracker-backup
+docs/superpowers/ specs/, plans/
+```
+
+Not every file exists yet; the plan says which task creates each.
+
+## How the code is put together
+
+- `db.connect()` opens connections in autocommit mode (`isolation_level=None`) with foreign keys on and WAL. A single statement commits by itself; wrap anything that must be atomic in `with db.transaction(con):` (`BEGIN IMMEDIATE`).
+- `app.db()` is the per-request connection in `flask.g`. `app.init_db()` runs `migrate()` at import, so every start migrates.
+
+## Tests
+
+- `tests/conftest.py` sets the environment before importing `app`, and gives every test a fresh database (`client`, `con`).
+
+## Verification gate
+
+Run before every commit; all of it must pass:
+
+```sh
+python -m pytest -q && ruff check && for f in static/js/*.js; do node --check "$f"; done
+```
+
+(The `node --check` loop applies once `static/js` exists.) CI (`.github/workflows/ci.yml`) runs pytest on Python 3.12 and the latest Python, pytest on Alpine's `py3-*` packages, `ruff check`, and `node --check`.

@@ -1,0 +1,12 @@
+# Lint only (CI runs `ruff check`); no formatting is enforced.
+target-version = "py312"
+line-length = 160
+extend-exclude = ["dist"]
+
+[lint]
+select = ["E", "F"]
+ignore = [
+    "E402",  # tests/conftest.py sets the environment before importing the app, on purpose
+    "E701",  # `if x: y` one-liners
+    "E702",  # `a; b` one-liners, as in the plan's tests
+]
