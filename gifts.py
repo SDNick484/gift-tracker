@@ -147,7 +147,9 @@ def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int]) -> None:
 
 
 # ---------------------------------------------------------------- writing
-def create(con, user: dict, data: dict) -> int:
+def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) -> int:
+    """`wishlist_item_id` links the new gift to a wish (wishlist.add_wish only; never read from a request body). One
+    gift per wish: a second link raises sqlite3.IntegrityError and nothing is created."""
     f = _fields(data, partial=False)
     recipients = _person_ids(con, data, "recipient_ids")
     if not recipients:
@@ -179,14 +181,17 @@ def create(con, user: dict, data: dict) -> int:
         if exchange_id is not None:
             con.execute("UPDATE gifts SET exchange_id = ? WHERE id = ?", (exchange_id, gid))
             exchanges.check_gift(con, gid)  # 400 / 409 roll the gift back
+        if wishlist_item_id is not None:
+            con.execute("UPDATE gifts SET wishlist_item_id = ? WHERE id = ?", (wishlist_item_id, gid))
     return gid
 
 
-def update(con, gift_id: int, data: dict, actor: str | None = None) -> None:
+def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_write=None) -> None:
     """Change title, url, store, price, notes, recipients, givers, Santa, the order fields (orders.FIELDS), the
     hiding place (location_id), the exchange it is a gift for (exchange_id) or the status. A changed giver list can change the track, with the consequences
     set_givers describes; Santa is checked against the result; a status goes through the same rules as
-    set_status, ordered included. All of it applies or none of it."""
+    set_status, ordered included. All of it applies or none of it. `after_write()` runs inside the transaction after
+    the local write (wishlist.update); if it raises, nothing is written."""
     _row(con, gift_id)
     f = _fields(data, partial=True)
     order = orders.parse(con, data)
@@ -222,18 +227,24 @@ def update(con, gift_id: int, data: dict, actor: str | None = None) -> None:
         else:
             orders.write(con, gift_id, order)
         exchanges.check_gift(con, gift_id)  # the link, new or old, must still be a draw
+        if after_write:
+            after_write()
 
 
-def set_status(con, gift_id: int, status: str, order: dict | None = None, actor: str | None = None) -> None:
+def set_status(con, gift_id: int, status: str, order: dict | None = None, actor: str | None = None, *,
+               after_write=None) -> None:
     """Any status on the gift's own track may be set directly; one from the other track is 400.
 
     `order` may carry order fields (orders.FIELDS), stored together with the status. Setting ordered needs seller,
     ship_to_id and eta, from `order` or already on the gift (400 naming what is missing, and nothing changes); it
     records `actor` as ordered_by. Setting arrived stamps arrived_on with today unless the gift or `order` has a
-    date."""
+    date. `after_write()` runs inside the transaction after the local write (wishlist.set_status); if it raises,
+    nothing is written."""
     _row(con, gift_id)
     with db.transaction(con):
         _apply_status(con, gift_id, status, order or {}, actor)
+        if after_write:
+            after_write()
 
 
 def _apply_status(con, gift_id: int, status: str, order: dict, actor: str | None) -> None:

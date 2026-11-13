@@ -22,6 +22,7 @@ import occasions
 import orders
 import people
 import tokens
+import wishlist
 from common import ApiError, is_school
 
 
@@ -201,6 +202,7 @@ def set_status(con, gift_id: int, data: dict, token: dict) -> None:
     order = {k: v for k, v in data.items() if k != "status"}
     if any(k not in orders.FIELDS for k in order):
         raise ApiError(400, ONLY_ORDER_FIELDS)
+    wishlist.refuse_agent_flip(con, gift_id, status)  # a token never writes to the wishlist
     gifts.set_status(con, gift_id, status, order, actor=token["name"])
     tokens.log_write(con, gift_id, token, f"status: {status}")
 

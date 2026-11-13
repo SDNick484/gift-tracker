@@ -35,10 +35,13 @@ def parse_assign(data: dict) -> tuple[list[int], list[int]]:
     return _id_list(data, "giver_ids"), _id_list(data, "expected_giver_ids")
 
 
-def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int]) -> None:
+def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int], after_write=None) -> None:
     """Replace the gift's givers, but only if they are still `expected_giver_ids` (compared as sets); otherwise
     409. Giving it to someone else moves it to the theirs track (told, told_at today) as gifts._set_givers does.
-    An empty giver_ids unassigns it: status idea, told_at cleared, Santa dropped."""
+    An empty giver_ids unassigns it: status idea, told_at cleared, Santa dropped.
+
+    `after_write()`, when given, runs inside the transaction after the local write (wishlist.assign writes the
+    reservation there); if it raises, nothing is written."""
     ids = gifts._person_ids(con, {"giver_ids": list(giver_ids)}, "giver_ids")  # 400 for a missing person
     with db.transaction(con):
         gifts.get(con, gift_id)  # 404
@@ -48,6 +51,8 @@ def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int
         gifts._set_givers(con, gift_id, ids)  # inside this transaction: gifts.set_givers would open its own
         if not ids:
             con.execute("UPDATE gifts SET status = 'idea', told_at = NULL WHERE id = ?", (gift_id,))
+        if after_write:
+            after_write()
 
 
 def _protected_person(con, person_id: int) -> dict:

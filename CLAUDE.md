@@ -48,7 +48,7 @@ A second instance of the same code (its own database, subdomain and Access polic
 
 - Ask `common.is_school()`, never a copy of `settings.MODE` taken at import: tests switch the mode with `monkeypatch.setattr(settings, "MODE", "school")`.
 - Family mode must not change: a family response gains no key (`mode` on `/api/me` and `role` on a person exist in school mode only), and `role` in a request body is ignored there.
-- A route that exists in one mode only is wrapped in `family_only` or `school_only` (under the route decorator): the other mode answers the generic 404 `{"error": "Not Found"}`. Lock, board, assign, the four location routes and `/lists/where` are family-only; the four matrix and cell routes are school-only. `tests/test_school.py` pins both lists (`FAMILY_ONLY`, `SCHOOL_ONLY`), so a new mode-specific route is added there.
+- A route that exists in one mode only is wrapped in `family_only` or `school_only` (under the route decorator): the other mode answers the generic 404 `{"error": "Not Found"}`. Lock, board, assign, the four location routes, `/lists/where` and the six wishlist routes are family-only; the four matrix and cell routes are school-only. `tests/test_school.py` pins both lists (`FAMILY_ONLY`, `SCHOOL_ONLY`), so a new mode-specific route is added there.
 - School mode has no lock: `app.unlocked()` is true, so the lock's filtering hides nothing. What must not appear is removed at the edges: `gift_json` drops `santa` and `refuse_locked_write` answers 400 when a body names it; `people._person` reports `protected: false` and setting it true is 400. A response built any other way must go through those.
 - `gifts.update` changes the recipient set; it must never delete and re-insert `gift_recipients` rows, or every edit of a group gift erases its details.
 - The installer's names and paths come from the block between `# instance-begin` and `# instance-end`, and the service script is the template between `# initd-begin` and `# initd-end`. Nothing else may hard-code `/opt/tracker` or the service name; `tests/test_installer_static.py` pins the default install's names, paths, port and rendered service script.
@@ -98,6 +98,27 @@ Decisions in `docs/superpowers/plans/2026-11-13-gift-exchanges.md`. Logic is in 
 - Over budget is computed on read (`exchanges.over_budget`), never stored, and never refuses a write.
 - Copying an occasion copies exchange names and budgets only. School mode has exchanges but no lock and only owners may draw; no exchange route is mode-specific.
 
+## Wishlist link
+
+Decisions in `docs/superpowers/plans/2026-11-13-wishlist-link.md`; the contract with the other app is `docs/wishlist-feed.md`.
+Logic is in `wishlist.py`; routes are the wishlist block of `app.py` plus the board, assign, status, PATCH and DELETE of a gift.
+
+- Off unless `WISHLIST_URL` is set, and always off in school mode (`wishlist.enabled()`): then no request is ever made
+  (`_request` refuses), every wishlist route is the generic 404, and the board answer has no `wishlist` key. Every
+  wishlist route is `family_only`, `@unlock_required`, then `wishlist_on`; `tests/test_school.py` pins them.
+- `wishlist._open` is the only code that touches the network; tests replace it (`tests/test_wishlist.py`'s `wl`
+  fixture, which also checks every request). Paths are fixed text plus an integer item id, never request input; no query
+  string; no redirect followed; `TIMEOUT` and `MAX_BYTES` bound every request; any surprise is `Unreachable`, never a 500.
+- An outbound body has the keys `by` and `purchased` only. `by` comes from `wishlist.label(giver_ids)` and nothing else:
+  never pass it Santa, a status or a price. A log line names an item id, a status code or an exception class, never the
+  token, a wish or a person.
+- Writes to a gift linked to a listed wish go through `wishlist.assign`, `set_status`, `update` and `delete_gift`,
+  which run the plain writer with an `after_write` hook: the outbound call happens inside the writer's transaction after
+  the local write, and a failure after an accepted call is taken back (`_Undo`). Do not call `boards.assign`,
+  `gifts.set_status`, `gifts.update` or `gifts.delete` directly from a web route. `/api/v1` never writes to the
+  wishlist (`refuse_agent_flip`) and never shows it.
+- Wishlist text (names, holders, URLs) is untrusted: `esc()` in the UI, and the parser drops a non-http(s) URL.
+
 ## File structure
 
 ```
@@ -118,6 +139,7 @@ addresses.py      ship-to addresses, exactly one home
 locations.py      the hiding-place tree, the ancestor rule, set_gift_location
 lists.py          Not here yet, To wrap, Where is it?, and the home counts
 exchanges.py      gift exchanges: draws, the gift for a draw, the over-budget flag, the lock on protected draws
+wishlist.py       the wishlist link: guarded transport, cached feed, labels, matching, board wishes, write-back
 tokens.py         agent API tokens (hash only), the notes a token leaves on a gift
 agent.py          /api/v1: what each token scope may read and write, a gift as a scope sees it
 mcp_server.py     MCP tools over /api/v1 (TrackerClient; stdio when run directly)
@@ -130,7 +152,7 @@ tests/            conftest.py + one test file per module
 installer/        setup-head.sh, build.sh
 deploy/           deploy.env.example
 ops/              tracker-backup
-docs/             mcp-setup.md; superpowers/specs/, superpowers/plans/
+docs/             mcp-setup.md, wishlist-feed.md; superpowers/specs/, superpowers/plans/
 ```
 
 Not every file exists yet; the plan says which task creates each.

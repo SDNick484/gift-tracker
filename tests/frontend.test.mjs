@@ -1140,3 +1140,85 @@ test("exchanges screen: asks for the current occasion's exchanges and draws them
   await renderExchangesScreen({ view: none, alive: () => true, parts: ["exchanges"], rerender() {} });
   assert.ok(none.innerHTML.includes("No occasion yet"));
 });
+
+// ---------------------------------------------------------------- board.js: the wishlist link
+import { ageText, aliasBody, renderWishlist, safeHref, wishBadge, wishChoices, wishlistLine } from "../static/js/board.js";
+
+const wlWish = (over = {}) => ({ id: 11, name: "Lego set", url: "https://example.com/lego", store: "Toy Shop", price_cents: 4999,
+  occasion: "Christmas", secret: false, reserved_by: null, purchased: false, purchased_by: null, ...over });
+const wlBlock = (over = {}) => ({ linked: true, tab_id: 3, reachable: true, fetched_at: 1800000000, age_seconds: 30,
+  tabs: [{ id: 3, name: "Kid 1", person_id: 7 }], open: [wlWish()], reserved: [], unmatched: [], ...over });
+const wlPeople = [{ id: 3, name: "Pat", active: true }, { id: 9, name: "Gone", active: false }];
+
+test("wishlist: only http(s) links are followed", () => {
+  assert.equal(safeHref("https://example.com/a"), "https://example.com/a");
+  assert.equal(safeHref("HTTP://example.com/a"), "HTTP://example.com/a");
+  for (const bad of ["javascript:alert(1)", "data:text/html,x", " https://example.com", "//example.com", "", null, undefined, 5]) {
+    assert.equal(safeHref(bad), "", String(bad));
+  }
+});
+
+test("wishlist: the age line says when it was read, and what is shown while it cannot be reached", () => {
+  assert.equal(ageText(30), "just now");
+  assert.equal(ageText(120), "2 min ago");
+  assert.equal(ageText(7200), "2 h ago");
+  assert.equal(ageText(3 * 86400), "3 days ago");
+  assert.equal(ageText(null), "");
+  assert.equal(wishlistLine(wlBlock()), "Wishlist checked just now.");
+  assert.equal(wishlistLine(wlBlock({ reachable: false, age_seconds: 7200 })),
+    "The wishlist cannot be reached. Showing what it said 2 h ago; Assign is off for wishes.");
+  assert.equal(wishlistLine(wlBlock({ reachable: false, fetched_at: null, age_seconds: null })),
+    "The wishlist cannot be reached, and nothing has been read from it yet.");
+});
+
+test("wishlist: the badge on a linked gift says whether the wishlist agrees", () => {
+  const w = (over) => ({ wish: { item_id: 11, listed: true, reserved_by: "Us", purchased: false, purchased_by: null, in_sync: true, ...over } });
+  assert.equal(wishBadge({}), "");
+  assert.equal(wishBadge(w({})), "On the wishlist");
+  assert.equal(wishBadge(w({ purchased: true, purchased_by: "Pat" })), "Bought on the wishlist");
+  assert.equal(wishBadge(w({ in_sync: false, reserved_by: "Grandma" })), "Wishlist says reserved by Grandma");
+  assert.equal(wishBadge(w({ in_sync: false, purchased: true, purchased_by: "Lee" })), "Wishlist says bought by Lee");
+  assert.equal(wishBadge(w({ in_sync: false, reserved_by: null })), "Wishlist says nobody has it");
+  assert.equal(wishBadge(w({ listed: false, in_sync: false })), "Not in the wishlist feed");
+});
+
+test("wishlist: a wish can go on the board unassigned or straight to a giver; an unmatched name maps to a person", () => {
+  assert.deepEqual(wishChoices([{ value: "1,2", label: "Us" }]),
+    [{ value: "", label: "Add to board…" }, { value: "board", label: "Add, unassigned" }, { value: "1,2", label: "Us" }]);
+  assert.deepEqual(aliasBody({ kind: "name", value: "uncle rob", label: "Uncle Rob" }, "3"), { kind: "name", value: "uncle rob", person_id: 3 });
+});
+
+test("wishlist: everything from the wishlist is escaped and a bad link is not a link", () => {
+  const html = renderWishlist(wlBlock({
+    linked: false, tabs: [{ id: 3, name: "<i>Tab</i>", person_id: null }],
+    open: [wlWish({ name: "<img src=x onerror=1>", url: "javascript:alert(1)", store: "<b>S</b>" })],
+    reserved: [wlWish({ id: 12, url: null, name: "<script>x</script>", reserved_by: "<b>R</b>", person_id: null, label: "<b>R</b>" })],
+    unmatched: [{ kind: "name", value: "<b>r</b>", label: "<script>R</script>" }],
+  }), [{ value: "1", label: "<b>Us</b>" }], wlPeople);
+  assert.ok(!/<img|<b>|<i>|<script/.test(html), html);
+  assert.ok(!html.includes("javascript:") && !html.includes("href="), "a non-http(s) link is plain text");
+  assert.ok(html.includes("data-wl-tab") && html.includes("data-alias=\"0\"") && html.includes("data-wl-refresh"));
+  assert.ok(html.includes('<option value="3">Pat</option>') && !html.includes(">Gone<"), "only active people to map to");
+  const linked = renderWishlist(wlBlock(), [], wlPeople);
+  assert.ok(linked.includes('href="https://example.com/lego"') && linked.includes('rel="noopener noreferrer"'));
+  assert.ok(!linked.includes("data-wl-tab"), "a linked board does not ask for its tab");
+  assert.ok(linked.includes("$49.99") && linked.includes("Toy Shop · Christmas"));
+});
+
+test("wishlist: while it cannot be reached, Assign is off for wishes and linked gifts only", () => {
+  const offline = renderWishlist(wlBlock({ reachable: false }), [], wlPeople);
+  assert.ok(/data-wish="11"[^>]* disabled>/.test(offline), offline);
+  assert.ok(!/data-wish="11"[^>]* disabled>/.test(renderWishlist(wlBlock(), [], wlPeople)));
+  const b = board({ wishlist: wlBlock({ reachable: false, open: [] }) });
+  b.unassigned[0].wish = { item_id: 11, listed: true, reserved_by: null, purchased: false, purchased_by: null, in_sync: true };
+  const html = renderBoard(b, "Christmas", [], wlPeople);
+  assert.ok(/data-gift="20"[^>]* disabled>/.test(html), "the linked gift");
+  assert.ok(!/data-gift="21"[^>]* disabled>/.test(html) && !/data-gift="22"[^>]* disabled>/.test(html), "gifts typed in by hand");
+  assert.ok(html.includes("On the wishlist") && html.includes('class="badge wish"'));
+});
+
+test("wishlist: a board without the link renders as it did", () => {
+  const html = renderBoard(board(), "Christmas", assignChoices(households, ppl5));
+  assert.ok(!html.includes("wishlist") && !html.includes("Wishlist") && !html.includes("disabled") && !html.includes("data-wish"));
+  assert.equal((html.match(/class="assign"/g) ?? []).length, 3);
+});

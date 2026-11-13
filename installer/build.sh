@@ -27,8 +27,9 @@ find "$STAGE" \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} \; 
 DEFAULTS="$STAGE/defaults"
 : > "$DEFAULTS"
 if [ -f "$ENV_FILE" ]; then
-  # The MCP service's household values too; never its token, which is made in the app after the install.
-  for key in ALLOWED_EMAILS USERS APP_NAME CF_TEAM_DOMAIN CF_AUD MODE MCP_PUBLIC_HOSTS CF_ACCESS_AUD MCP_ALLOWED_EMAILS; do
+  # The MCP service's household values too; never its token, which is made in the app after the install. The
+  # wishlist's URL, never its WISHLIST_TOKEN (set it in the container's config).
+  for key in ALLOWED_EMAILS USERS APP_NAME CF_TEAM_DOMAIN CF_AUD MODE MCP_PUBLIC_HOSTS CF_ACCESS_AUD MCP_ALLOWED_EMAILS WISHLIST_URL; do
     val=$(sed -n "s/^$key=//p" "$ENV_FILE" | head -n1 | sed "s/^[\"']//;s/[\"']\$//")
     if printf '%s' "$val" | grep -q '["`$\\]'; then
       echo "$key in $ENV_FILE contains a character that is not allowed: double quote, backtick, dollar sign or backslash."; exit 1
