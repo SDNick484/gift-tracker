@@ -4,6 +4,7 @@
 // 423 that opens the PIN pad.
 import { events, get, send } from "./api.js";
 import { currentOccasion, esc, isUnlocked, renderChecked, renderColor, renderOptions, setOccasion, state, toast } from "./core.js";
+import { isSchool, roleChoices } from "./mode.js";
 
 const KINDS = [
   { value: "christmas", label: "Christmas" }, { value: "birthday", label: "Birthday" },
@@ -24,6 +25,7 @@ export function personPayload(v) {
   };
   if (v.active !== undefined) body.active = v.active;
   if (v.colorTouched) body.color = v.color;
+  if (v.role !== undefined) body.role = v.role.trim(); // school mode only: the form has the field only there
   return body;
 }
 
@@ -68,15 +70,23 @@ const renderDim = on => (on ? " dim" : "");
 
 const renderGroupOptions = (groups, selected) => renderOptions([{ value: "", label: "No group" }, ...groups.map(g => ({ value: g.id, label: g.name }))], selected ?? "");
 
-export const renderPersonForm = (p, groups) => `
+// School mode swaps the Protected box for a Role field (the server ignores role in family mode and refuses protected
+// in school mode, so each mode's form shows only its own).
+const renderProtectedBox = (p, school) => (school ? "" : `
+      <label class="check"><input name="protected" type="checkbox"${renderChecked(p?.protected)}> Protected (hidden while locked)</label>`);
+const renderRoleField = (p, school) => (school
+  ? `<label class="field"><span>Role</span><input name="role" type="text" maxlength="50" list="roles" value="${esc(p?.role ?? "")}" placeholder="homeroom, assistant, ..."></label>`
+  : "");
+
+export const renderPersonForm = (p, groups, school = false) => `
   <form class="fields" data-form="${esc(p ? "person-edit" : "person-add")}" data-id="${esc(p?.id ?? "")}" autocomplete="off">
     <label class="field"><span>Name</span><input name="name" type="text" maxlength="100" value="${esc(p?.name ?? "")}" required></label>
     <div class="two">
       <label class="field"><span>Group</span><select name="group">${renderGroupOptions(groups, p?.group_id)}</select></label>
       <label class="field"><span>Household</span><input name="household" type="text" maxlength="100" list="households" value="${esc(p?.household ?? "")}"></label>
     </div>
-    <div class="inline-form"><label class="field"><span>Color</span><input name="color" type="color" value="${esc(p?.color ?? NEUTRAL)}"></label>
-      <label class="check"><input name="protected" type="checkbox"${renderChecked(p?.protected)}> Protected (hidden while locked)</label></div>
+    ${renderRoleField(p, school)}
+    <div class="inline-form"><label class="field"><span>Color</span><input name="color" type="color" value="${esc(p?.color ?? NEUTRAL)}"></label>${renderProtectedBox(p, school)}</div>
     ${renderActiveBox(p)}
     <p class="form-error" role="alert"></p>
     <div class="actions"><button class="btn primary" type="submit">${esc(p ? "Save" : "Add person")}</button>${renderPersonEnd(p)}</div>
@@ -86,7 +96,7 @@ const renderPersonEnd = p => (p ? `<button class="btn" type="button" data-act="c
 const renderPersonDelete = p => (p.is_user ? "" : `<button class="btn danger" type="button" data-act="delete-person" data-id="${esc(p.id)}">Delete</button>`);
 
 const renderPerson = (p, groups) => `<li class="row${renderDim(!p.active)}"${renderColor(p.color)}>
-  <div class="main"><div class="name">${esc(p.name)}${renderBadge(p.protected, "protected")}${renderBadge(!p.active, "inactive")}${renderBadge(p.is_user, "owner")}</div>
+  <div class="main"><div class="name">${esc(p.name)}${renderBadge(p.protected, "protected")}${renderBadge(Boolean(p.role), p.role)}${renderBadge(!p.active, "inactive")}${renderBadge(p.is_user, "owner")}</div>
     <div class="line">${esc([groups.find(g => g.id === p.group_id)?.name, p.household].filter(Boolean).join(" · "))}</div></div>
   <button type="button" class="btn small" data-act="edit-person" data-id="${esc(p.id)}">Edit</button>
   <div class="slot" data-slot="person-${esc(p.id)}"></div>
@@ -127,6 +137,11 @@ export const renderOccasionEdit = o => `
 
 const renderCopyOptions = (occasions, selected) => renderOptions([{ value: "", label: "Start empty" }, ...occasions.map(o => ({ value: o.id, label: o.name }))], selected);
 
+const renderRoleList = d => (d.school ? `<datalist id="roles">${renderRoleOptions(d.roles)}</datalist>` : "");
+const renderRoleOptions = roles => roles.map(r => `<option value="${esc(r)}"></option>`).join("");
+// A school instance has no lock, so no PIN.
+const renderPinSection = d => (d.school ? "" : renderPinForm(d.me.has_pin));
+
 const renderPinForm = hasPin => `
   <form class="card fields" data-form="pin" autocomplete="off">
     <h3>PIN</h3>
@@ -144,6 +159,7 @@ const renderCurrentPin = hasPin => (hasPin
 export const renderSettings = d => `
   <div class="head"><h2>Settings</h2><span class="sub">${esc(d.me.email)}</span></div>
   <datalist id="households">${renderHouseholdOptions(d.households)}</datalist>
+  ${renderRoleList(d)}
   <div class="cols">
     <div class="col">
       <section class="card"><h3>People</h3>
@@ -173,7 +189,7 @@ export const renderSettings = d => `
         <p class="muted small">A household is the label its members share; set it on each person. It is one choice in the Assign menu.</p>
         <ul class="rows">${renderHouseholdRows(d.households)}</ul>
       </section>
-      ${renderPinForm(d.me.has_pin)}
+      ${renderPinSection(d)}
       <p class="muted small"><a href="/cdn-cgi/access/logout">Sign out</a></p>
     </div>
   </div>`;
@@ -194,6 +210,7 @@ export async function render(ctx) {
     me: state.me, groups, people: shown, hiddenCount: state.people.length - shown.length,
     households: visibleHouseholds(households, state.people, unlocked), occasions: state.occasions,
     copyDefault: current ? current.id : "",
+    school: isSchool(state.me), roles: roleChoices(state.people),
   };
   view.innerHTML = renderSettings(data);
   const fromWasLocked = !unlocked;
@@ -227,6 +244,7 @@ export async function render(ctx) {
         personPayload({
           name: text(form, "name"), group: text(form, "group"), household: text(form, "household"),
           protected: box(form, "protected"), active: box(form, "active"), color: color.value, colorTouched: color.dataset.touched === "1",
+          role: field(form, "role") ? text(form, "role") : undefined,
         })), kind === "person-add" ? "Added" : "Saved");
     } else if (kind === "group-add" || kind === "group-edit") {
       ok = await run(form, () => send(kind === "group-add" ? "POST" : "PATCH", kind === "group-add" ? "/api/groups" : `/api/groups/${id}`,
@@ -261,11 +279,11 @@ export async function render(ctx) {
     const id = act.dataset.id;
     if (act.dataset.act === "new-person") {
       const slot = view.querySelector('[data-slot="person-new"]');
-      slot.innerHTML = renderPersonForm(null, await get("/api/groups"));
+      slot.innerHTML = renderPersonForm(null, await get("/api/groups"), data.school);
       slot.querySelector("input[name=name]").focus();
     } else if (act.dataset.act === "edit-person") {
       const slot = view.querySelector(`[data-slot="person-${id}"]`);
-      slot.innerHTML = renderPersonForm(state.people.find(p => p.id === Number(id)), await get("/api/groups"));
+      slot.innerHTML = renderPersonForm(state.people.find(p => p.id === Number(id)), await get("/api/groups"), data.school);
     } else if (act.dataset.act === "edit-occasion") {
       view.querySelector(`[data-slot="occasion-${id}"]`).innerHTML = renderOccasionEdit(state.occasions.find(o => o.id === Number(id)));
     } else if (act.dataset.act === "cancel-edit") {

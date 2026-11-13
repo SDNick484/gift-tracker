@@ -450,3 +450,260 @@ test("lock: the pad has ten digits, a delete key and Unlock; with no PIN it poin
   const none = renderNoPin();
   assert.ok(none.includes('href="#/settings"') && !none.includes("data-key"));
 });
+
+// ---------------------------------------------------------------- school mode: mode.js and school.js
+import { activeRoles, isSchool, lockApplies, peopleWithRole, pickScreen, roleChoices, ROLE_SUGGESTIONS } from "../static/js/mode.js";
+import { cellMap, cellPayload, cellState, columnCaption, daysUntil, newGiftPayload, renderAddGift, renderCellEditor, renderMatrix, renderPage as renderSchoolPage, whoChoices } from "../static/js/school.js";
+
+test("school: the mode comes from /api/me, and a family instance sends no mode key", () => {
+  assert.equal(isSchool({ mode: "school" }), true);
+  assert.equal(isSchool({}), false);
+  assert.equal(isSchool(null), false);
+  assert.equal(lockApplies({ mode: "school" }), false);
+  assert.equal(lockApplies({ unlocked: false }), true);
+  assert.equal(lockApplies(null), false);
+});
+
+test("school: pickScreen swaps home and drops the board only in school mode", () => {
+  const family = { "": "F-home", board: "F-board", gift: "F-gift" }, school = { "": "S-home" };
+  assert.equal(pickScreen("", family, school, {}), "F-home");
+  assert.equal(pickScreen("board", family, school, {}), "F-board");
+  assert.equal(pickScreen("nope", family, school, {}), null);
+  assert.equal(pickScreen("", family, school, { mode: "school" }), "S-home");
+  assert.equal(pickScreen("board", family, school, { mode: "school" }), null);
+  assert.equal(pickScreen("gift", family, school, { mode: "school" }), "F-gift");
+  assert.equal(pickScreen("nope", family, school, { mode: "school" }), null);
+});
+
+const STAFF = [
+  { id: 1, name: "Ms. Avery", role: "homeroom", active: true },
+  { id: 2, name: "Ms. Blake", role: "Homeroom", active: true },
+  { id: 3, name: "Ms. Chen", role: "assistant", active: true },
+  { id: 4, name: "Mr. Diaz", role: "bus driver", active: false },
+  { id: 5, name: "Alex", role: null, active: true, is_user: true },
+];
+
+test("school: roleChoices lists the suggestions then roles in use once; activeRoles needs an active person", () => {
+  assert.deepEqual(roleChoices(STAFF), [...ROLE_SUGGESTIONS, "bus driver"]);
+  assert.deepEqual(roleChoices([]), ROLE_SUGGESTIONS);
+  assert.deepEqual(activeRoles(STAFF), ["homeroom", "assistant"]);
+  assert.deepEqual(peopleWithRole(STAFF, " HOMEROOM ").map(p => p.id), [1, 2]);
+  assert.deepEqual(peopleWithRole(STAFF, "bus driver"), []);
+  assert.deepEqual(peopleWithRole(STAFF, ""), []);
+});
+
+test("school: cell state and column caption", () => {
+  assert.equal(cellState(undefined), "off");
+  assert.equal(cellState({ done: false }), "on");
+  assert.equal(cellState({ done: true }), "done");
+  assert.equal(columnCaption({ recipient_count: 7, done_count: 3 }), "7 · 3 done");
+});
+
+test("school: cellPayload sends only what the form has, trimmed, and refuses a long detail", () => {
+  assert.deepEqual(cellPayload({ detail: "  $35 · coffee shop ", done: true }), { detail: "$35 · coffee shop", done: true });
+  assert.deepEqual(cellPayload({ detail: "" }), { detail: "" });
+  assert.deepEqual(cellPayload({ done: false }), { done: false });
+  assert.throws(() => cellPayload({ detail: "x".repeat(201) }), /200/);
+  assert.doesNotThrow(() => cellPayload({ detail: "x".repeat(200) }));
+});
+
+test("school: newGiftPayload picks a role's active staff or one person, never an owner", () => {
+  assert.deepEqual(newGiftPayload({ title: " Card $35 ", who: "role:homeroom" }, 9, STAFF), { occasion_id: 9, title: "Card $35", recipient_ids: [1, 2], giver_ids: [] });
+  assert.deepEqual(newGiftPayload({ title: "Granola", who: "person:3" }, 9, STAFF).recipient_ids, [3]);
+  assert.throws(() => newGiftPayload({ title: "", who: "person:3" }, 9, STAFF), /title/);
+  assert.throws(() => newGiftPayload({ title: "x", who: "role:bus driver" }, 9, STAFF), /No one has that role/);
+  assert.throws(() => newGiftPayload({ title: "x", who: "" }, 9, STAFF), /Pick who/);
+  assert.throws(() => newGiftPayload({ title: "x", who: "person:abc" }, 9, STAFF), /Pick who/);
+  assert.deepEqual(whoChoices(STAFF).map(c => c.value), ["", "role:homeroom", "role:assistant", "person:1", "person:2", "person:3"]);
+});
+
+const MATRIX = {
+  occasion: { id: 9, name: "Christmas 2025", kind: "christmas", date: "2025-12-19", archived: false },
+  gifts: [
+    { id: 10, title: "Card $35", status: "idea", recipient_count: 2, done_count: 1 },
+    { id: 11, title: "Granola", status: "idea", recipient_count: 1, done_count: 0 },
+  ],
+  staff: [
+    { id: 1, name: "Ms. Avery", role: "homeroom", color: "#1f4d3a", active: true, plan: "individual" },
+    { id: 3, name: "Ms. Chen", role: "assistant", color: null, active: false, plan: null },
+  ],
+  cells: [
+    { gift_id: 10, person_id: 1, detail: "$35 · coffee shop", done: true },
+    { gift_id: 10, person_id: 3, detail: null, done: false },
+    { gift_id: 11, person_id: 3, detail: null, done: false },
+  ],
+};
+
+test("school: the matrix draws staff down, gifts across, a state per cell and a count per column", () => {
+  const html = renderMatrix(MATRIX, ["homeroom", "assistant"]);
+  assert.equal([...html.matchAll(/<tr>/g)].length, 4, "head, two staff, total");
+  assert.ok(html.includes('href="#/gift/10"') && html.includes('href="#/person/3"'));
+  assert.ok(html.includes("2 · 1 done") && html.includes("1 · 0 done"));
+  assert.ok(html.includes('class="cell done has-detail" data-gift="10" data-person="1"'));
+  assert.ok(html.includes('class="cell on" data-gift="10" data-person="3"'));
+  assert.ok(html.includes('class="cell off" data-gift="11" data-person="1"'));
+  assert.ok(html.includes('aria-label="Ms. Avery, Granola: not included"'));
+  assert.ok(html.includes('<th scope="row">2 staff</th><td>2</td><td>1</td>'), "the footer counts people per column");
+  assert.ok(html.includes('data-color="#1f4d3a"') && html.includes("staff dim"), "color from data, inactive dimmed");
+  assert.equal([...html.matchAll(/class="role-add"/g)].length, 2);
+  assert.ok(!html.includes("style="));
+});
+
+test("school: the matrix says so when there is no staff or no gift, and skips role menus with no roles", () => {
+  assert.ok(renderMatrix({ ...MATRIX, staff: [], cells: [] }, []).includes("No staff in this occasion"));
+  const noGifts = renderMatrix({ ...MATRIX, gifts: [], cells: [] }, []);
+  assert.ok(noGifts.includes("No gifts yet") && noGifts.includes("<table"));
+  assert.ok(!renderMatrix(MATRIX, []).includes("role-add"));
+  assert.equal(cellMap(MATRIX).get("10:1").detail, "$35 · coffee shop");
+});
+
+test("school: everything typed is escaped in the grid, the editor, the form and the page", () => {
+  const evil = `"><script>alert(1)</script>`;
+  const m = {
+    ...MATRIX, occasion: { ...MATRIX.occasion, name: evil },
+    gifts: [{ id: 10, title: evil, status: "idea", recipient_count: 1, done_count: 0 }],
+    staff: [{ id: 1, name: evil, role: evil, color: evil, active: true, plan: null }],
+    cells: [{ gift_id: 10, person_id: 1, detail: evil, done: false }],
+  };
+  const people = [{ id: 1, name: evil, role: evil, active: true }];
+  const html = renderMatrix(m, [evil]) + renderCellEditor(m.gifts[0], m.staff[0], m.cells[0]) + renderAddGift(people)
+    + renderSchoolPage(m, [{ id: 9, name: evil, archived: false }], people, new Date(2025, 11, 1));
+  assert.ok(!/<script|<svg|<img/.test(html), html);
+  assert.ok(!html.includes('data-color="&quot;'), "a bad color is dropped, not echoed");
+});
+
+test("school: the cell editor shows the detail and done state; Remove and Close are buttons", () => {
+  const html = renderCellEditor(MATRIX.gifts[0], MATRIX.staff[0], MATRIX.cells[0]);
+  assert.ok(html.includes('value="$35 · coffee shop"') && html.includes('name="done" type="checkbox" checked'));
+  assert.ok(html.includes('data-act="remove"') && html.includes('data-act="close"'));
+  assert.ok(html.includes('data-gift="10" data-person="1"'));
+});
+
+test("school: daysUntil counts calendar days", () => {
+  assert.equal(daysUntil("2025-12-19", new Date(2025, 11, 1)), 18);
+  assert.equal(daysUntil("2025-12-19", new Date(2025, 11, 19)), 0);
+  assert.equal(daysUntil("2025-12-19", new Date(2025, 11, 20)), -1);
+});
+
+test("school: settings forms swap Protected for Role, hide the PIN card and badge the role", () => {
+  const person = { id: 3, name: "Ms. Avery", group_id: null, household: "", color: "#1f4d3a", protected: false, active: true, is_user: false, role: "homeroom" };
+  const school = renderPersonForm(person, [], true);
+  assert.ok(school.includes('name="role"') && school.includes('value="homeroom"') && !school.includes('name="protected"'));
+  const family = renderPersonForm(person, []);
+  assert.ok(!family.includes('name="role"') && family.includes('name="protected"'));
+  assert.equal(renderPersonForm(person, [], false), family);
+  const data = { me: { email: "alex@example.com", has_pin: false }, groups: [], people: [person], hiddenCount: 0, households: [], occasions: [], copyDefault: "" };
+  const page = renderSettings({ ...data, school: true, roles: ["homeroom", "assistant"] });
+  assert.ok(!page.includes("Set PIN") && !page.includes("<h3>PIN</h3>"));
+  assert.ok(page.includes('<datalist id="roles"><option value="homeroom"></option>') && page.includes('<span class="badge">homeroom</span>'));
+  const { role: _none, ...familyPerson } = person; // a family instance's people have no role key
+  const fam = renderSettings({ ...data, people: [familyPerson] });
+  assert.ok(fam.includes("Set PIN") && !fam.includes('id="roles"') && !fam.includes("homeroom"));
+});
+
+test("school: personPayload sends role only when the form has it, and never protected from a school form", () => {
+  const base = { name: "Ms. Avery", group: "", household: "", color: "#000000", colorTouched: false };
+  assert.deepEqual(personPayload({ ...base, protected: undefined, role: " homeroom " }), { name: "Ms. Avery", group_id: null, household: "", protected: undefined, role: "homeroom" });
+  assert.equal(JSON.stringify(personPayload({ ...base, protected: undefined, role: "" })), '{"name":"Ms. Avery","group_id":null,"household":"","role":""}');
+  assert.ok(!("role" in personPayload({ ...base, protected: false })));
+});
+
+// The screen's wiring, against stand-in elements (no DOM or browser here): which request each tap sends and what
+// is drawn afterwards. The markup itself is checked above; this catches a wrong id or a handler on the wrong node.
+import { render as renderSchoolScreen } from "../static/js/school.js";
+import { state } from "../static/js/core.js";
+
+function schoolHarness(handler) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const call = { method: init.method, url, body: init.body ? JSON.parse(init.body) : undefined };
+    calls.push(call);
+    const [status, data] = handler(call);
+    return { ok: status < 400, status, json: async () => data };
+  };
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }), body: { append(m) { toasts.push(m.textContent); } } };
+  const toasts = [];
+  const node = (extra = {}) => ({ innerHTML: "", handlers: {}, addEventListener(t, f) { this.handlers[t] = f; }, querySelectorAll: () => [], ...extra });
+  const error = { textContent: "" };
+  const input = () => ({ focus() {}, value: "" });
+  const els = { "#occasion": node(), "#matrix": node(), "#editor": node(), "#add-gift": node() };
+  els["#editor"].querySelector = sel => (sel === "form" ? els.editorForm : input());
+  const view = { innerHTML: "", querySelector: sel => els[sel] };
+  Object.assign(state, { occasionId: 9, people: STAFF, occasions: [{ id: 9, name: "Christmas 2025", archived: false, current: true }] });
+  return { calls, toasts, els, error, view, ctx: { view, alive: () => true, rerender() { calls.push("rerender"); } } };
+}
+
+const tap = (giftId, personId) => ({ target: { closest: sel => (sel === "button.cell" ? { dataset: { gift: String(giftId), person: String(personId) } } : null) } });
+
+test("school screen: tapping an empty cell adds that person and redraws the grid from the server", async () => {
+  let matrixCalls = 0;
+  const h = schoolHarness(c => {
+    if (c.method === "GET") return [200, { ...MATRIX, gifts: MATRIX.gifts.map(g => ({ ...g, recipient_count: g.recipient_count + matrixCalls++ })) }];
+    return [201, { gift_id: 11, person_id: 1, detail: null, done: false, recipient_count: 2, done_count: 0 }];
+  });
+  await renderSchoolScreen(h.ctx);
+  assert.ok(h.view.innerHTML.includes('id="matrix"') && h.view.innerHTML.includes('id="add-gift"'));
+  assert.deepEqual(h.calls[0], { method: "GET", url: "/api/occasions/9/matrix", body: undefined });
+  await h.els["#matrix"].handlers.click(tap(11, 1));
+  assert.deepEqual(h.calls.slice(1).map(c => `${c.method} ${c.url}`), ["PUT /api/gifts/11/recipients/1", "GET /api/occasions/9/matrix"]);
+  assert.deepEqual(h.calls[1].body, {});
+  assert.ok(h.els["#matrix"].innerHTML.includes('class="cell off"'), "the grid was redrawn");
+  await h.els["#matrix"].handlers.click({ target: { closest: () => null } });   // a tap elsewhere does nothing
+  assert.equal(h.calls.length, 3);
+});
+
+test("school screen: tapping a filled cell opens the editor, Save sends detail and done, Remove deletes", async () => {
+  const h = schoolHarness(c => (c.method === "GET" ? [200, MATRIX] : [200, { ok: true }]));
+  await renderSchoolScreen(h.ctx);
+  await h.els["#matrix"].handlers.click(tap(10, 1));
+  assert.ok(h.els["#editor"].innerHTML.includes('id="cell-editor"') && h.els["#editor"].innerHTML.includes('value="$35 · coffee shop"'));
+  assert.equal(h.calls.length, 1, "opening the editor sends nothing");
+  h.els.editorForm = { dataset: { gift: "10", person: "1" }, elements: { detail: { value: " $35 · bookstore " }, done: { checked: false } }, querySelector: () => h.error };
+  await h.els["#editor"].handlers.submit({ preventDefault() {}, target: h.els.editorForm });
+  assert.deepEqual(h.calls[1], { method: "PUT", url: "/api/gifts/10/recipients/1", body: { detail: "$35 · bookstore", done: false } });
+  assert.equal(h.els["#editor"].innerHTML, "", "closed after saving");
+  await h.els["#matrix"].handlers.click(tap(10, 3));
+  await h.els["#editor"].handlers.click({ target: { closest: () => ({ dataset: { act: "remove" } }) } });
+  assert.equal(h.calls.at(-2).method, "DELETE");
+  assert.equal(h.calls.at(-2).url, "/api/gifts/10/recipients/1");
+});
+
+test("school screen: a refused removal shows the server's sentence and keeps the editor open", async () => {
+  const h = schoolHarness(c => (c.method === "GET" ? [200, MATRIX] : [409, { error: "A gift needs at least one recipient. Delete the gift instead." }]));
+  await renderSchoolScreen(h.ctx);
+  await h.els["#matrix"].handlers.click(tap(11, 3));
+  h.els.editorForm = { dataset: { gift: "11", person: "3" }, querySelector: () => h.error };
+  await h.els["#editor"].handlers.click({ target: { closest: () => ({ dataset: { act: "remove" } }) } });
+  assert.equal(h.error.textContent, "A gift needs at least one recipient. Delete the gift instead.");
+  assert.ok(h.els["#editor"].innerHTML.includes("cell-editor"));
+});
+
+test("school screen: the role menu posts the role and the add-gift form posts a gift with its first recipients", async () => {
+  const h = schoolHarness(c => {
+    if (c.method === "GET") return [200, MATRIX];
+    return [c.url === "/api/gifts" ? 201 : 200, c.url === "/api/gifts" ? { id: 12 } : { added: [2], recipient_count: 3, done_count: 1 }];
+  });
+  await renderSchoolScreen(h.ctx);
+  await h.els["#matrix"].handlers.change({ target: { closest: sel => (sel === "select.role-add" ? { value: "homeroom", dataset: { gift: "11" } } : null) } });
+  assert.deepEqual(h.calls[1], { method: "POST", url: "/api/gifts/11/recipients", body: { role: "homeroom" } });
+  assert.deepEqual(h.toasts, ["Added 1"]);
+  const form = { elements: { title: { value: "Cookies" }, who: { value: "role:assistant" } }, querySelector: () => h.error, reset() { this.wasReset = true; } };
+  await h.els["#add-gift"].handlers.submit({ preventDefault() {}, target: form });
+  assert.deepEqual(h.calls.find(c => c.url === "/api/gifts").body, { occasion_id: 9, title: "Cookies", recipient_ids: [3], giver_ids: [] });
+  assert.equal(form.wasReset, true);
+  const bad = { elements: { title: { value: "Cookies" }, who: { value: "" } }, querySelector: () => h.error };
+  const before = h.calls.length;
+  await h.els["#add-gift"].handlers.submit({ preventDefault() {}, target: bad });
+  assert.equal(h.error.textContent, "Pick who it is for.");
+  assert.equal(h.calls.length, before, "nothing is sent for an invalid form");
+});
+
+test("school screen: a new occasion with no staff, and no occasion at all, draw a notice", async () => {
+  const h = schoolHarness(() => [200, { ...MATRIX, staff: [], gifts: [], cells: [] }]);
+  await renderSchoolScreen(h.ctx);
+  assert.ok(h.view.innerHTML.includes("No staff in this occasion"));
+  state.occasionId = null;
+  const none = { innerHTML: "" };
+  await renderSchoolScreen({ view: none, alive: () => true });
+  assert.ok(none.innerHTML.includes("No occasion yet"));
+});

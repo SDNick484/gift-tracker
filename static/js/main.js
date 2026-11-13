@@ -5,6 +5,7 @@
 import { ApiError, events, send } from "./api.js";
 import { applyColors, esc, loadAll, parseHash, renderIcon, state } from "./core.js";
 import { idleExpired, openPad, padIsOpen } from "./lock.js";
+import { lockApplies, pickScreen } from "./mode.js";
 
 const SCREENS = {
   "": () => import("./home.js"),
@@ -13,6 +14,11 @@ const SCREENS = {
   gift: () => import("./gift.js"),
   board: () => import("./board.js"),
   settings: () => import("./settings.js"),
+};
+
+// In school mode these replace the screen of the same name, and the board is gone (see mode.js).
+const SCHOOL_SCREENS = {
+  "": () => import("./school.js"),
 };
 
 const host = document.getElementById("app");
@@ -48,7 +54,7 @@ async function draw(ctx) {
     document.title = state.me.app_name;
     document.getElementById("appName").textContent = state.me.app_name;
     updateLockButton();
-    const load = SCREENS[ctx.parts[0] ?? ""];
+    const load = pickScreen(ctx.parts[0] ?? "", SCREENS, SCHOOL_SCREENS, state.me);
     if (!load) {
       view.innerHTML = renderNotFound();
       return;
@@ -71,7 +77,7 @@ const renderLockLabel = unlocked => `${renderIcon(unlocked ? "unlock" : "lock")}
 
 function updateLockButton() {
   const unlocked = state.me?.unlocked === true;
-  lockBtn.hidden = !state.me;
+  lockBtn.hidden = !lockApplies(state.me); // a school instance has no lock
   lockBtn.innerHTML = renderLockLabel(unlocked);
   lockBtn.classList.toggle("is-open", unlocked);
   lockBtn.setAttribute("aria-label", unlocked ? "Lock now" : "Unlock");
@@ -114,10 +120,10 @@ for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstar
   window.addEventListener(type, () => { lastInput = Date.now(); }, { capture: true, passive: true });
 }
 setInterval(() => {
-  if (state.me?.unlocked && idleExpired(Date.now(), lastInput, state.me.lock_idle_seconds)) lockNow();
+  if (lockApplies(state.me) && state.me.unlocked && idleExpired(Date.now(), lastInput, state.me.lock_idle_seconds)) lockNow();
 }, 1000);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden" && state.me?.unlocked) lockNow();
+  if (document.visibilityState === "hidden" && lockApplies(state.me) && state.me.unlocked) lockNow();
 });
 
 window.addEventListener("hashchange", route);
