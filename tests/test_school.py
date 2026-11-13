@@ -177,3 +177,51 @@ def test_mode_is_read_trimmed_and_lowercased_with_family_as_the_default(raw, mod
 def test_an_unknown_mode_is_refused_at_import():
     r = _import_settings("staff")
     assert r.returncode != 0 and "MODE" in r.stderr
+
+
+# ---------------------------------------------------------------- role
+def test_role_is_stored_trimmed_and_cleared_with_empty_text(client, school):
+    pid = mk_person(client, "Ms. Avery", role="  homeroom ")
+    assert client.get("/api/people", headers=auth()).get_json()[-1]["role"] == "homeroom"
+    r = client.patch(f"/api/people/{pid}", json={"role": ""}, headers=mut())
+    assert r.status_code == 200 and r.get_json()["role"] is None
+    assert client.patch(f"/api/people/{pid}", json={"name": "Ms. Avery"}, headers=mut()).get_json()["role"] is None
+    assert client.patch(f"/api/people/{pid}", json={"role": "special subject"}, headers=mut()).get_json()["role"] == "special subject"
+    assert client.patch(f"/api/people/{pid}", json={"name": "Ms. Avery-Hill"}, headers=mut()).get_json()["role"] == "special subject"
+
+
+@pytest.mark.parametrize("role", ["x" * 51, 5, True, ["a"]])
+def test_a_bad_role_is_400_and_stores_nothing(client, school, role):
+    assert client.post("/api/people", json={"name": "Ms. Avery", "role": role}, headers=mut()).status_code == 400
+    pid = mk_person(client, "Ms. Blake", role="homeroom")
+    assert client.patch(f"/api/people/{pid}", json={"role": role}, headers=mut()).status_code == 400
+    assert con_rows("SELECT name, role FROM people WHERE name LIKE 'Ms.%'") == [("Ms. Blake", "homeroom")]
+
+
+def test_role_is_ignored_and_never_returned_in_family_mode(client):
+    r = client.post("/api/people", json={"name": "Ms. Avery", "role": "homeroom"}, headers=mut())
+    assert r.status_code == 201 and "role" not in r.get_json()
+    assert con_rows("SELECT role FROM people WHERE name = 'Ms. Avery'") == [(None,)]
+    assert all("role" not in p for p in client.get("/api/people", headers=auth()).get_json())
+    assert client.patch(f"/api/people/{r.get_json()['id']}", json={"role": "x" * 99}, headers=mut()).status_code == 200  # ignored, not validated
+
+
+# ---------------------------------------------------------------- editing a group gift keeps each recipient's detail
+def test_editing_recipients_keeps_detail_and_done_of_those_who_stay(client, school):
+    import db
+    o = mk_occasion(client, "Christmas 2025", date="2025-12-19")
+    avery, blake, chen = (mk_person(client, n) for n in ("Ms. Avery", "Ms. Blake", "Ms. Chen"))
+    g = mk_gift(client, o, "Card", to=[avery, blake])
+    c = db.connect(settings.DB_PATH)
+    c.execute("UPDATE gift_recipients SET detail = '$35 · coffee shop', done = 1 WHERE gift_id = ? AND person_id = ?", (g, avery))
+    c.execute("UPDATE gift_recipients SET detail = 'by hand' WHERE gift_id = ? AND person_id = ?", (g, blake))
+    c.close()
+    r = client.patch(f"/api/gifts/{g}", json={"recipient_ids": [avery, chen]}, headers=mut())
+    assert r.status_code == 200 and r.get_json()["recipient_ids"] == [avery, chen]
+    assert con_rows("SELECT person_id, detail, done FROM gift_recipients WHERE gift_id = ? ORDER BY person_id", g) == \
+        [(avery, "$35 · coffee shop", 1), (chen, None, 0)]
+    # the same list again changes nothing, and a title-only edit leaves every row alone
+    client.patch(f"/api/gifts/{g}", json={"recipient_ids": [chen, avery], "title": "Cards"}, headers=mut())
+    client.patch(f"/api/gifts/{g}", json={"title": "Gift cards"}, headers=mut())
+    assert con_rows("SELECT person_id, detail, done FROM gift_recipients WHERE gift_id = ? ORDER BY person_id", g) == \
+        [(avery, "$35 · coffee shop", 1), (chen, None, 0)]

@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -81,6 +81,17 @@ def _to_v1(con):
 
 
 MIGRATIONS = {1: _to_v1}  # version -> step that brings version-1 up to it
+
+
+# Version 2 (school mode): a staff role, and a detail and a done flag on each recipient of a group gift. Columns
+# only, so existing rows keep their data and take the defaults; family instances simply never fill them.
+def _to_v2(con):
+    con.execute("ALTER TABLE people ADD COLUMN role TEXT")
+    con.execute("ALTER TABLE gift_recipients ADD COLUMN detail TEXT")
+    con.execute("ALTER TABLE gift_recipients ADD COLUMN done INTEGER NOT NULL DEFAULT 0")
+
+
+MIGRATIONS[2] = _to_v2
 
 
 def migrate(con):
