@@ -9,6 +9,7 @@ import { findEntry, giftLine, groupByOccasion, renderPage, totalsText } from "..
 import { buildPatch, canSanta, pickList, renderPage as renderGiftPage, renderSteps, stepClass } from "../static/js/gift.js";
 import { assignBody, assignChoices, countGifts, evennessLine, renderBoard, splitLine } from "../static/js/board.js";
 import { groupPayload, occasionPayload, personPayload, pinPayload, renderOccasionEdit, renderPersonForm, renderSettings, visibleHouseholds } from "../static/js/settings.js";
+import { idleExpired, nextEntry, renderNoPin, renderPad } from "../static/js/lock.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
@@ -423,4 +424,29 @@ test("settings: forms escape typed text, and an owner cannot be deleted", () => 
   assert.ok(!renderPersonForm(owner, []).includes("delete-person"));
   assert.ok(renderPersonForm({ ...owner, is_user: false }, []).includes("delete-person"));
   assert.ok(renderPersonForm(null, []).includes("Add person") && !renderPersonForm(null, []).includes('name="active"'));
+});
+
+// ---------------------------------------------------------------- lock.js
+test("lock: the pad takes digits up to eight and backspace, nothing else", () => {
+  assert.equal(nextEntry("", "4"), "4");
+  assert.equal(nextEntry("48", "2"), "482");
+  assert.equal(nextEntry("12345678", "9"), "12345678");
+  assert.equal(nextEntry("482", "back"), "48");
+  assert.equal(nextEntry("", "back"), "");
+  assert.equal(nextEntry("48", "a"), "48");
+  assert.equal(nextEntry("48", "12"), "48");
+});
+
+test("lock: idle for lock_idle_seconds locks, a second less does not", () => {
+  assert.equal(idleExpired(1_000_000 + 300_000, 1_000_000, 300), true);
+  assert.equal(idleExpired(1_000_000 + 299_999, 1_000_000, 300), false);
+});
+
+test("lock: the pad has ten digits, a delete key and Unlock; with no PIN it points at Settings", () => {
+  const pad = renderPad();
+  assert.deepEqual([...pad.matchAll(/data-key="(\d)"/g)].map(m => m[1]).sort(), ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+  assert.ok(pad.includes('data-key="back"') && pad.includes('data-act="go"') && pad.includes('data-act="cancel"'));
+  assert.ok(!pad.includes("<input"), "digits are never typed into a field the browser could remember");
+  const none = renderNoPin();
+  assert.ok(none.includes('href="#/settings"') && !none.includes("data-key"));
 });

@@ -2,8 +2,9 @@
 // Screens are loaded on demand. Each exports `render(ctx)` with ctx = { view, parts, query, alive, rerender }:
 // `view` is a fresh element for this visit, `alive()` is false once the user has moved on, and `rerender()`
 // draws the same route again (after an unlock, say).
-import { ApiError, events } from "./api.js";
-import { applyColors, esc, loadAll, parseHash, state } from "./core.js";
+import { ApiError, events, send } from "./api.js";
+import { applyColors, esc, loadAll, parseHash, renderIcon, state } from "./core.js";
+import { idleExpired, openPad } from "./lock.js";
 
 const SCREENS = {
   "": () => import("./home.js"),
@@ -46,6 +47,7 @@ async function draw(ctx) {
     await loadAll();
     document.title = state.me.app_name;
     document.getElementById("appName").textContent = state.me.app_name;
+    updateLockButton();
     const load = SCREENS[ctx.parts[0] ?? ""];
     if (!load) {
       view.innerHTML = renderNotFound();
@@ -63,10 +65,58 @@ async function draw(ctx) {
   }
 }
 
-// A 423 anywhere means the lock closed behind our back: remember it, and draw the route again so nothing
-// protected stays on screen.
-events.addEventListener("locked", () => {
+// ---------------------------------------------------------------- the lock
+const lockBtn = document.getElementById("lockBtn");
+const renderLockLabel = unlocked => `${renderIcon(unlocked ? "unlock" : "lock")}<span>${esc(unlocked ? "Lock" : "Unlock")}</span>`;
+
+function updateLockButton() {
+  const unlocked = state.me?.unlocked === true;
+  lockBtn.hidden = !state.me;
+  lockBtn.innerHTML = renderLockLabel(unlocked);
+  lockBtn.classList.toggle("is-open", unlocked);
+  lockBtn.setAttribute("aria-label", unlocked ? "Lock now" : "Unlock");
+}
+
+// Locks now (the Lock button, the idle timer, the tab going to the background) and draws the route again, so
+// nothing protected stays on screen. A protected screen then answers 423 and the pad opens.
+let locking = false;
+async function lockNow() {
+  if (locking) return;
+  locking = true;
+  try {
+    await send("POST", "/api/lock/lock", {});
+  } catch {
+    // Offline or refused: the server still decides what is shown. The redraw below asks it again.
+  }
   if (state.me) state.me.unlocked = false;
+  updateLockButton();
+  locking = false;
+  route();
+}
+
+// A 423 anywhere means the lock is closed: remember it and open the pad. Once it unlocks, draw the route again.
+// This does not redraw by itself: a screen that gets a 423 would ask again and loop.
+events.addEventListener("locked", async () => {
+  if (state.me) state.me.unlocked = false;
+  updateLockButton();
+  if (await openPad()) route();
+});
+
+lockBtn.addEventListener("click", () => {
+  if (state.me?.unlocked) lockNow();
+  else events.dispatchEvent(new Event("locked"));
+});
+
+// Idle: no pointer or key input for lock_idle_seconds. Hidden tab: lock at once.
+let lastInput = Date.now();
+for (const type of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) {
+  window.addEventListener(type, () => { lastInput = Date.now(); }, { capture: true, passive: true });
+}
+setInterval(() => {
+  if (state.me?.unlocked && idleExpired(Date.now(), lastInput, state.me.lock_idle_seconds)) lockNow();
+}, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && state.me?.unlocked) lockNow();
 });
 
 window.addEventListener("hashchange", route);
