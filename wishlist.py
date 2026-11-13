@@ -16,11 +16,11 @@ redirect; the whole exchange has a TIMEOUT-second deadline and the answer at mos
 Unreachable, never a 500. Log lines name an item id, a status code or an exception class: never the token, a wish or
 a person.
 
-Writing back. The outbound call runs inside the local BEGIN IMMEDIATE, before the local write (the before_write hooks of
-boards.assign and gifts.set_status). A wishlist refusal or an unreachable wishlist raises before anything local is
-written, so the transaction rolls back; if the local write or the commit fails after a successful call, _Undo puts the
-wishlist back as the cache said it was. The other owner's simultaneous write waits on the lock and then sees the
-change."""
+Writing back. The outbound call runs inside the local BEGIN IMMEDIATE, after the local write and before COMMIT (the
+after_write hooks of boards.assign, gifts.set_status and gifts.update), and sends only what differs from the cache
+(_plan). A wishlist refusal or an unreachable wishlist raises before COMMIT, so the local write rolls back; if anything
+fails after the wishlist accepted a change (another call, the cache write, the commit), _Undo takes the change back.
+The other owner's simultaneous write waits on the lock and then sees the change."""
 import http.client
 import json
 import logging
@@ -106,8 +106,8 @@ def _open(method: str, url: str, headers: dict, body: bytes | None, timeout: flo
 
 
 def _request(method: str, path: str, payload: dict | None = None) -> tuple[int, bytes]:
-    """One request to WISHLIST_URL's origin and prefix plus `path`, a fixed string built here (never user input).
-    Raises Unreachable for anything but an answer of at most MAX_BYTES."""
+    """One request to WISHLIST_URL's origin and prefix plus `path`, a fixed string built here (never user input, so it
+    is safe in a log line). Raises Unreachable for anything but an answer of at most MAX_BYTES."""
     if not enabled():
         raise Unreachable()  # off, or school mode: never a request
     base = urlsplit(settings.WISHLIST_URL)
@@ -120,16 +120,12 @@ def _request(method: str, path: str, payload: dict | None = None) -> tuple[int, 
     try:
         status, data = _open(method, url, headers, body, TIMEOUT)
     except (OSError, http.client.HTTPException, ValueError, _TooLarge) as exc:
-        log.warning("wishlist: %s %s failed (%s)", method, _log_path(path), type(exc).__name__)
+        log.warning("wishlist: %s %s failed (%s)", method, path, type(exc).__name__)
         raise Unreachable() from None
     if len(data) > MAX_BYTES:
-        log.warning("wishlist: %s %s answered more than %d bytes", method, _log_path(path), MAX_BYTES)
+        log.warning("wishlist: %s %s answered more than %d bytes", method, path, MAX_BYTES)
         raise Unreachable()
     return status, data
-
-
-def _log_path(path: str) -> str:
-    return path  # fixed text and an integer item id only (see _item_path); kept as a function so that stays visible
 
 
 def _item_path(item_id, action: str) -> str:
@@ -148,7 +144,7 @@ def _write(item_id: int, action: str, payload: dict) -> None:
         raise Conflict()
     if status == 404:
         raise Gone()
-    log.warning("wishlist: POST %s answered %d", _log_path(path), status)
+    log.warning("wishlist: POST %s answered %d", path, status)
     raise Unreachable()
 
 
