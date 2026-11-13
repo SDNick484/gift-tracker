@@ -38,6 +38,9 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
   a value in its `args()`. A route that shows or changes gifts filters on `gifts.PROTECTED_SQL` or checks
   `gifts.visible()`, and a board-like route takes `@unlock_required`.
 - A new route of any kind stays behind the identity guard: `tests/test_identity.py` walks `app.url_map` and expects 403 from the LAN everywhere but `/healthz`.
+- A new `/api/v1` route goes in the `/api/v1` block of `app.py` with its logic in `agent.py`, and must pass
+  `tests/test_agent_privacy.py`, which walks every `/api/v1` rule with locked tokens of each scope: give a new path
+  argument name a value in its `args()` (and in `tests/test_privacy.py`'s, which walks it too and gets 401).
 
 ## School mode (`MODE=school`)
 
@@ -60,6 +63,31 @@ Decisions in `docs/superpowers/plans/2026-11-13-after-purchase.md`.
 - Every list and count in `lists.py` filters on `gifts.PROTECTED_SQL`. The location tree and the address list name no gift. Deleting an address or a location answers 409 when a gift uses it, so both deletes require the unlock (a locked caller could otherwise learn that a hidden gift uses it).
 - School mode has no hiding places: gift JSON drops `location_id` and `location_path`, a body naming `location_id` is 400, the lists drop the location keys. Order fields, addresses, `/lists/pending`, `/lists/to-wrap` and `/lists/counts` work in both modes.
 
+## Agent API and MCP server (`/api/v1`)
+
+Decisions in `docs/superpowers/plans/2026-11-13-agent-api.md`; setup in `docs/mcp-setup.md`.
+
+- `/api/v1` admits `Authorization: Bearer <token>` and nothing else (`agent_guard` in `app.py`): no Cloudflare
+  identity, no unlock cookie, no CSRF header. Presenting nothing is the usual 403; presenting anything that is not a
+  live token is 401. A token gets nothing outside `/api/v1`.
+- Tokens are made, listed and revoked by an unlocked owner (`/api/tokens`, `@unlock_required`), shown once, stored
+  as a SHA-256 hash (`tokens.py`). A name stays taken after revoke.
+- A token is locked unless `agent.sees_protected(token)` (`full`, made with `unlocked`, family mode). A locked token
+  never gets a protected gift, a protected person, a `santa` key or a hiding place: lists filter on
+  `gifts.PROTECTED_SQL`, `agent.visible_row` answers the missing-gift 404, and a protected person named in a body is
+  "No such person.". No scope but `full` gets `santa`, location keys, givers or `created_by`. No `/api/v1` route is
+  mode-specific; school mode drops `santa` and location keys from every v1 gift.
+- What each scope may read and set is the `agent.SCOPES` table. Writes go through `orders.update`,
+  `gifts.set_status` and `gifts.create`, never inline SQL, and each leaves a `gift_agent_log` note with the token
+  (`tokens.log_write`); the web gift JSON shows them as `agent_log`.
+- The MCP server (`mcp_server.py`, `mcp_http.py`) only calls the REST API with one token and registers the tools of
+  that token's scope (`SCOPE_TOOLS`). `mcp_remote.py` is a verbatim copy of mcp-server-shared's `remote.py`: do not
+  edit it (`tests/test_mcp_http.py` checks its hash). The `mcp` package lives only in the MCP service's venv
+  (`requirements-mcp.txt`, locally `.venv-mcp/`), never in the app's dependencies; tests that need it
+  `importorskip`, and CI installs it and fails if any MCP test is skipped.
+- The installer's MCP service is `$NAME-mcp`: names in the instance block, service script between `# mcp-initd-begin`
+  and `# mcp-initd-end`, settings in its own `$MCP_CONF` (never in the app's `$CONF` or `settings.py`).
+
 ## File structure
 
 ```
@@ -79,13 +107,19 @@ orders.py         order fields, the ship-to check, the one writer (update), ship
 addresses.py      ship-to addresses, exactly one home
 locations.py      the hiding-place tree, the ancestor rule, set_gift_location
 lists.py          Not here yet, To wrap, Where is it?, and the home counts
+tokens.py         agent API tokens (hash only), the notes a token leaves on a gift
+agent.py          /api/v1: what each token scope may read and write, a gift as a scope sees it
+mcp_server.py     MCP tools over /api/v1 (TrackerClient; stdio when run directly)
+mcp_http.py       the MCP service: Streamable HTTP behind Cloudflare Access
+mcp_remote.py     verbatim copy of mcp-server-shared remote.py (Access JWT, Host check, /healthz)
+requirements-mcp.txt  the MCP service's venv (not the app's)
 static/           index.html (GET / fills in APP_NAME), style.css, manifest.json (GET /manifest.json adds the name), icon.svg
 static/js/        ES modules: main (router), core, api, lock and one module per screen
 tests/            conftest.py + one test file per module
 installer/        setup-head.sh, build.sh
 deploy/           deploy.env.example
 ops/              tracker-backup
-docs/superpowers/ specs/, plans/
+docs/             mcp-setup.md; superpowers/specs/, superpowers/plans/
 ```
 
 Not every file exists yet; the plan says which task creates each.
