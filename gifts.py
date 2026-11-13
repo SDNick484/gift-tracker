@@ -10,7 +10,9 @@ A gift's track follows its givers. It is "ours" when no giver is set or an owner
 "theirs" when only other people give it. Money is integer cents (common.parse_cents)."""
 import common
 import db
+import locations
 import occasions
+import orders
 import people
 from common import ApiError, flag, parse_cents, text
 
@@ -66,7 +68,8 @@ def to_json(con, row, *, unlocked: bool) -> dict:
            "track": track(set(givers), people.user_person_ids(con)), "url": row["url"], "store": row["store"],
            "price_cents": row["price_cents"], "notes": row["notes"], "recipient_ids": recipients,
            "giver_ids": givers, "told_at": row["told_at"], "created_by": row["created_by"],
-           "updated_at": row["updated_at"]}
+           "updated_at": row["updated_at"], **orders.to_json(con, row), "location_id": row["location_id"],
+           "location_path": locations.path_map(con).get(row["location_id"]) if row["location_id"] else None}
     if unlocked:
         out["santa"] = bool(row["santa"])
     return out
@@ -168,11 +171,17 @@ def create(con, user: dict, data: dict) -> int:
     return gid
 
 
-def update(con, gift_id: int, data: dict) -> None:
-    """Change title, url, store, price, notes, recipients, givers or Santa. A changed giver list can change the
-    track, with the consequences set_givers describes; Santa is checked against the result."""
+def update(con, gift_id: int, data: dict, actor: str | None = None) -> None:
+    """Change title, url, store, price, notes, recipients, givers, Santa, the order fields (orders.FIELDS), the
+    hiding place (location_id) or the status. A changed giver list can change the track, with the consequences
+    set_givers describes; Santa is checked against the result; a status goes through the same rules as
+    set_status, ordered included. All of it applies or none of it."""
     _row(con, gift_id)
     f = _fields(data, partial=True)
+    order = orders.parse(con, data)
+    status = data.get("status")
+    if status is not None and not isinstance(status, str):
+        raise ApiError(400, "status must be text.")
     recipients = _person_ids(con, data, "recipient_ids")
     if recipients is not None and not recipients:
         raise ApiError(400, "A gift needs at least one recipient.")
@@ -193,15 +202,39 @@ def update(con, gift_id: int, data: dict) -> None:
             f["santa"] = int(santa)
         f["updated_at"] = common.now()
         con.execute(f"UPDATE gifts SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), gift_id))
+        if "location_id" in data:
+            locations.set_gift_location(con, gift_id, data["location_id"])
+        if status is not None:
+            _apply_status(con, gift_id, status, data, actor)  # writes the order fields too
+        else:
+            orders.write(con, gift_id, order)
 
 
-def set_status(con, gift_id: int, status: str) -> None:
-    """Any status on the gift's own track may be set directly; one from the other track is 400."""
+def set_status(con, gift_id: int, status: str, order: dict | None = None, actor: str | None = None) -> None:
+    """Any status on the gift's own track may be set directly; one from the other track is 400.
+
+    `order` may carry order fields (orders.FIELDS), stored together with the status. Setting ordered needs seller,
+    ship_to_id and eta, from `order` or already on the gift (400 naming what is missing, and nothing changes); it
+    records `actor` as ordered_by. Setting arrived stamps arrived_on with today unless the gift or `order` has a
+    date."""
+    _row(con, gift_id)
+    with db.transaction(con):
+        _apply_status(con, gift_id, status, order or {}, actor)
+
+
+def _apply_status(con, gift_id: int, status: str, order: dict, actor: str | None) -> None:
+    """set_status inside the caller's transaction."""
     row = _row(con, gift_id)
     trk = track(set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con))
     if status not in _statuses(trk):
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
-    con.execute("UPDATE gifts SET status = ?, updated_at = ? WHERE id = ?", (status, common.now(), row["id"]))
+    fields = orders.parse(con, order)
+    if status == "ordered":
+        orders.require_ordered({k: fields[k] if k in fields else row[k] for k in orders.REQUIRED_FOR_ORDERED})
+        fields["ordered_by"] = actor or row["ordered_by"]
+    if status == "arrived" and not (fields["arrived_on"] if "arrived_on" in fields else row["arrived_on"]):
+        fields["arrived_on"] = common.today()
+    orders.write(con, gift_id, {**fields, "status": status})
 
 
 def set_givers(con, gift_id: int, giver_ids: list[int]) -> None:

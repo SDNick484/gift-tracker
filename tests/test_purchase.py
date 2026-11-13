@@ -166,3 +166,150 @@ def test_location_routes_are_404_in_school_mode_and_addresses_are_not(client, sc
         assert (r.status_code, r.get_json()) == (404, missing.get_json()), (method, url)
     assert client.get("/api/addresses", headers=auth()).status_code == 200
     assert post(client, "/api/addresses", {"label": "Office"}).status_code == 201
+
+
+# ---------------------------------------------------------------- order fields and the ship-to check
+def set_status(client, gift_id, status, **order):
+    return post(client, f"/api/gifts/{gift_id}/status", {"status": status, **order})
+
+
+def camera(client, ids, **fields):
+    return mk_gift(client, ids.o, "Camera", to=[ids.jordan], frm=[ids.alex], status="decided", **fields)
+
+
+ORDER = {"seller": "Camera shop", "ship_to_id": 1, "eta": "2026-12-09"}
+
+
+def test_ordered_needs_seller_ship_to_and_eta(client, ids):
+    g = camera(client, ids)
+    for body in ({}, {"seller": "Camera shop"}, {"seller": "Camera shop", "ship_to_id": 1}, {"eta": "2026-12-09", "ship_to_id": 1},
+                 {"seller": "  ", "ship_to_id": 1, "eta": "2026-12-09"}, {"seller": "Camera shop", "ship_to_id": None, "eta": "2026-12-09"}):
+        r = set_status(client, g, "ordered", **body)
+        assert r.status_code == 400, body
+    r = set_status(client, g, "ordered")
+    assert r.get_json()["missing"] == ["seller", "ship_to_id", "eta"]
+    assert r.get_json()["error"] == "Marking a gift ordered needs seller, ship_to_id, eta."
+    assert set_status(client, g, "ordered", seller="Camera shop").get_json()["missing"] == ["ship_to_id", "eta"]
+    assert con_rows("SELECT status, seller, eta, ordered_by, order_number FROM gifts WHERE id = ?", g) == [("decided", None, None, None, None)]
+    r = set_status(client, g, "ordered", order_number="1234", **ORDER)
+    j = r.get_json()
+    assert (r.status_code, j["status"], j["seller"], j["order_number"], j["eta"], j["ship_to_id"], j["ship_warning"], j["ordered_by"]) == (
+        200, "ordered", "Camera shop", "1234", "2026-12-09", 1, False, "Alex")
+
+
+def test_fields_stored_earlier_count_and_patch_is_guarded_too(client, ids):
+    g = camera(client, ids)
+    assert patch(client, f"/api/gifts/{g}", {"status": "ordered"}).status_code == 400            # PATCH is no way around the rule
+    assert patch(client, f"/api/gifts/{g}", {"title": "Camera 2", "status": "ordered", "seller": "Shop"}).status_code == 400
+    assert con_rows("SELECT title, status, seller FROM gifts WHERE id = ?", g) == [("Camera", "decided", None)]   # all or nothing
+    assert patch(client, f"/api/gifts/{g}", ORDER).status_code == 200
+    assert con_rows("SELECT status FROM gifts WHERE id = ?", g) == [("decided",)]
+    assert set_status(client, g, "ordered").status_code == 200                                    # stored fields are enough
+    h = camera(client, ids)
+    r = patch(client, f"/api/gifts/{h}", {"status": "ordered", "title": "Camera 3", **ORDER})
+    assert (r.status_code, r.get_json()["status"], r.get_json()["title"]) == (200, "ordered", "Camera 3")
+    assert patch(client, f"/api/gifts/{h}", {"status": 5}).status_code == 400
+
+
+def test_ship_to_elsewhere_warns_until_marked_as_meant(client, ids):
+    gp = make_address(client, "Grandparents' house")
+    g = camera(client, ids)
+    j = set_status(client, g, "ordered", seller="Shop", ship_to_id=gp, eta="2026-12-09").get_json()
+    assert (j["ship_to_id"], j["ship_elsewhere_ok"], j["ship_warning"]) == (gp, False, True)
+    assert patch(client, f"/api/gifts/{g}", {"ship_elsewhere_ok": True}).get_json()["ship_warning"] is False
+    assert patch(client, f"/api/gifts/{g}", {"ship_elsewhere_ok": False}).get_json()["ship_warning"] is True
+    assert patch(client, f"/api/gifts/{g}", {"ship_to_id": 1}).get_json()["ship_warning"] is False   # home
+    assert patch(client, f"/api/gifts/{g}", {"ship_to_id": gp}).get_json()["ship_warning"] is True
+    patch(client, f"/api/addresses/{gp}", {"is_home": True})                                          # the warning follows the home address
+    j = get(client, f"/api/gifts/{g}")
+    assert (j["ship_warning"], j["ship_to_id"]) == (False, gp)
+    patch(client, "/api/addresses/1", {"is_home": True})
+    assert get(client, f"/api/gifts/{g}")["ship_warning"] is True
+
+
+def test_a_gift_with_no_ship_to_has_no_warning(client, ids):
+    j = get(client, f"/api/gifts/{camera(client, ids)}")
+    assert (j["ship_to_id"], j["ship_warning"], j["seller"], j["order_number"], j["eta"], j["arrived_on"], j["ordered_by"],
+            j["ship_elsewhere_ok"], j["location_id"], j["location_path"]) == (None, False, None, None, None, None, None, False, None, None)
+
+
+def test_order_field_validation(client, ids):
+    g = camera(client, ids)
+    for body in ({"eta": "12/9/2026"}, {"eta": "2026-02-30"}, {"eta": 5}, {"arrived_on": "tomorrow"}, {"ship_to_id": 999},
+                 {"ship_to_id": "1"}, {"ship_to_id": True}, {"seller": "x" * 201}, {"order_number": "x" * 101},
+                 {"ship_elsewhere_ok": "yes"}, {"seller": 5}):
+        r = patch(client, f"/api/gifts/{g}", {"order_number": "KEEP", **body})
+        assert r.status_code == 400, body
+    assert con_rows("SELECT order_number FROM gifts WHERE id = ?", g) == [(None,)]                 # a 400 writes none of it
+    assert patch(client, f"/api/gifts/{g}", {"seller": "Shop", "order_number": "  77  ", "eta": "2026-12-09"}).status_code == 200
+    j = patch(client, f"/api/gifts/{g}", {"seller": "", "eta": None, "order_number": None}).get_json()
+    assert (j["seller"], j["eta"], j["order_number"]) == (None, None, None)                       # empty and null clear
+
+
+def test_arrived_stamps_today_unless_a_date_is_given(client, ids, freeze_today):
+    freeze_today("2026-12-08")
+    g, h = camera(client, ids), camera(client, ids)
+    assert set_status(client, g, "arrived").get_json()["arrived_on"] == "2026-12-08"             # bought in a store
+    freeze_today("2026-12-20")
+    assert set_status(client, g, "wrapped").get_json()["arrived_on"] == "2026-12-08"             # not overwritten
+    assert set_status(client, g, "arrived").get_json()["arrived_on"] == "2026-12-08"
+    assert set_status(client, h, "arrived", arrived_on="2026-12-07").get_json()["arrived_on"] == "2026-12-07"
+    assert set_status(client, h, "wrapped", arrived_on="").get_json()["arrived_on"] is None
+    assert set_status(client, h, "arrived").get_json()["arrived_on"] == "2026-12-20"
+
+
+def test_orders_update_is_the_one_writer(client, ids, con):
+    import orders
+    g = camera(client, ids)
+    orders.update(con, g, {"seller": "Shop", "ship_to_id": 1, "eta": "2026-12-09", "title": "ignored", "status": "given"})
+    assert tuple(con.execute("SELECT title, status, seller, ship_to_id, eta FROM gifts WHERE id = ?", (g,)).fetchone()) == (
+        "Camera", "decided", "Shop", 1, "2026-12-09")
+    from common import ApiError
+    with pytest.raises(ApiError) as e:
+        orders.update(con, 999, {})
+    assert e.value.status == 404
+    with pytest.raises(ApiError) as e:
+        orders.update(con, g, {"eta": "soon"})
+    assert e.value.status == 400
+
+
+def test_a_gift_from_someone_else_cannot_be_ordered(client, ids):
+    g = mk_gift(client, ids.o, "Book", to=[ids.jordan], frm=[ids.casey])
+    r = set_status(client, g, "ordered", **ORDER)
+    assert r.status_code == 400 and con_rows("SELECT status, seller FROM gifts WHERE id = ?", g) == [("told", None)]
+
+
+def test_a_gift_can_be_placed_and_unplaced(client, ids):
+    _, _, bin_ = make_chain(client)
+    g = camera(client, ids)
+    j = patch(client, f"/api/gifts/{g}", {"location_id": bin_}).get_json()
+    assert (j["location_id"], j["location_path"]) == (bin_, "Garage › Top shelf › Blue bin")
+    j = patch(client, f"/api/gifts/{g}", {"location_id": None}).get_json()
+    assert (j["location_id"], j["location_path"]) == (None, None)
+    for bad in (999, "1", True, 1.5):
+        assert patch(client, f"/api/gifts/{g}", {"location_id": bad}).status_code == 400, bad
+    assert get(client, f"/api/gifts/{g}")["location_id"] is None
+
+
+def test_school_mode_has_no_location_keys_but_keeps_order_fields(client, ids, school):
+    g = camera(client, ids)
+    j = get(client, f"/api/gifts/{g}")
+    assert "location_id" not in j and "location_path" not in j and "santa" not in j
+    assert {"seller", "order_number", "ship_to_id", "ship_elsewhere_ok", "eta", "arrived_on", "ordered_by", "ship_warning"} <= j.keys()
+    r = patch(client, f"/api/gifts/{g}", {"location_id": 1})
+    assert (r.status_code, r.get_json()) == (400, {"error": "Hiding places are not used in school mode."})
+    assert patch(client, f"/api/gifts/{g}", {"location_id": None}).status_code == 400
+    assert post(client, "/api/gifts", {"occasion_id": ids.o, "title": "x", "recipient_ids": [ids.jordan], "location_id": None}).status_code == 400
+    j = set_status(client, g, "ordered", **ORDER).get_json()
+    assert (j["status"], j["seller"], j["ordered_by"]) == ("ordered", "Camera shop", "Alex") and "location_id" not in j
+    assert con_rows("SELECT location_id FROM gifts WHERE id = ?", g) == [(None,)]
+
+
+def test_a_locked_request_cannot_reach_a_protected_gifts_order_fields(client, ids):
+    g = mk_protected_gift(ids, title="ZZ-SECRET-GIFT")
+    for method, url, body in (("GET", f"/api/gifts/{g}", None), ("PATCH", f"/api/gifts/{g}", {"seller": "ZZ-SELLER"}),
+                              ("POST", f"/api/gifts/{g}/status", {"status": "ordered", **ORDER}),
+                              ("PATCH", f"/api/gifts/{g}", {"status": "ordered", **ORDER})):
+        r = client.open(url, method=method, json=body, headers=mut())
+        assert (r.status_code, r.get_json()) == (404, {"error": "No such gift."}), (method, url)
+    assert con_rows("SELECT status, seller, ordered_by FROM gifts WHERE id = ?", g) == [("idea", None, None)]

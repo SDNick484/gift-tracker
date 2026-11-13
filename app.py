@@ -315,6 +315,8 @@ def gift_json(row):
     out = gifts.to_json(db(), row, unlocked=unlocked())
     if is_school():
         out.pop("santa", None)  # school mode has no Santa, whatever the column says
+        out.pop("location_id", None)  # nor hiding places
+        out.pop("location_path", None)
     return out
 
 
@@ -329,6 +331,8 @@ def refuse_locked_write(data: dict) -> None:
     if is_school():
         if "santa" in data:
             raise ApiError(400, "Santa is not used in school mode.")
+        if "location_id" in data:
+            raise ApiError(400, "Hiding places are not used in school mode.")
         return  # nothing is locked in school mode
     if unlocked():
         return
@@ -357,7 +361,7 @@ def gifts_update(gift_id):
     visible_gift(gift_id)
     data = json_body()
     refuse_locked_write(data)
-    gifts.update(db(), gift_id, data)
+    gifts.update(db(), gift_id, data, actor=g.user["name"])
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
@@ -371,10 +375,11 @@ def gifts_delete(gift_id):
 @app.post("/api/gifts/<int:gift_id>/status")
 def gifts_status(gift_id):
     visible_gift(gift_id)
-    status = json_body().get("status")
+    data = json_body()
+    status = data.get("status")
     if not isinstance(status, str):
         raise ApiError(400, "status must be text.")
-    gifts.set_status(db(), gift_id, status)
+    gifts.set_status(db(), gift_id, status, data, actor=g.user["name"])  # the body may carry order fields
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
