@@ -798,3 +798,188 @@ test("lists screen: each tab asks for its own list; an unknown tab, and where in
   await renderListsScreen({ view: none, alive: () => true, parts: ["lists"] });
   assert.ok(none.innerHTML.includes("No occasion yet"));
 });
+
+
+// ---------------------------------------------------------------- after purchase: the order card and the places screen
+import { addressChoices, locationChoices, orderPayload, renderOrder, render as renderGiftScreen, statusBody } from "../static/js/gift.js";
+import { parentChoices, renderAddresses, renderLocations, renderPlaces, render as renderPlacesScreen } from "../static/js/places.js";
+
+const ADDRESSES = [{ id: 1, label: "Home", is_home: true }, { id: 2, label: "Grandparents' house", is_home: false }];
+const LOCATIONS = [
+  { id: 1, parent_id: null, name: "Garage", sort_order: 0, path: "Garage", depth: 0 },
+  { id: 2, parent_id: 1, name: "Top shelf", sort_order: 0, path: "Garage › Top shelf", depth: 1 },
+  { id: 3, parent_id: 2, name: "Blue bin", sort_order: 0, path: "Garage › Top shelf › Blue bin", depth: 2 },
+  { id: 4, parent_id: null, name: "Hall closet", sort_order: 1, path: "Hall closet", depth: 0 },
+];
+const orderGift = (over = {}) => fullGift({ seller: "Camera shop", order_number: "1234", ship_to_id: 1, ship_elsewhere_ok: false, eta: "2026-12-09", arrived_on: null, ordered_by: "Alex", ship_warning: false, location_id: null, location_path: null, ...over });
+const form = (over = {}) => ({ seller: "  Camera shop ", order_number: " 1234 ", ship_to_id: "2", ship_elsewhere_ok: true, eta: "2026-12-09", arrived_on: "", location_id: "3", ...over });
+
+test("order card: orderPayload trims, sends no address as null, and leaves the hiding place out in school mode", () => {
+  assert.deepEqual(orderPayload(form()), { seller: "Camera shop", order_number: "1234", ship_to_id: 2, ship_elsewhere_ok: true, eta: "2026-12-09", arrived_on: "", location_id: 3 });
+  assert.equal(orderPayload(form({ ship_to_id: "", location_id: "" })).ship_to_id, null);
+  assert.equal(orderPayload(form({ location_id: "" })).location_id, null);
+  assert.ok(!("location_id" in orderPayload(form(), true)));
+});
+
+test("order card: only ordered and arrived carry the order fields to /status, and never the hiding place", () => {
+  assert.deepEqual(statusBody("wrapped", form()), { status: "wrapped" });
+  assert.deepEqual(statusBody("ordered", null), { status: "ordered" }, "no order card: the status alone");
+  const ordered = statusBody("ordered", form());
+  assert.deepEqual(ordered, { status: "ordered", seller: "Camera shop", order_number: "1234", ship_to_id: 2, ship_elsewhere_ok: true, eta: "2026-12-09", arrived_on: "" });
+  assert.deepEqual(statusBody("arrived", form({ arrived_on: "2026-12-08" })).arrived_on, "2026-12-08");
+  assert.ok(!("location_id" in ordered));
+});
+
+test("order card: the pickers offer the addresses (home marked) and the places by path", () => {
+  assert.deepEqual(addressChoices(ADDRESSES).map(c => c.label), ["Pick an address", "Home (home)", "Grandparents' house"]);
+  assert.deepEqual(locationChoices(LOCATIONS).map(c => c.label), ["Not hidden yet", "Garage", "Garage › Top shelf", "Garage › Top shelf › Blue bin", "Hall closet"]);
+  const html = renderOrder(orderGift({ ship_to_id: 2, location_id: 3 }), ADDRESSES, LOCATIONS, false);
+  assert.ok(html.includes('<option value="2" selected>Grandparents&#39; house</option>') && html.includes('<option value="3" selected>Garage › Top shelf › Blue bin</option>'));
+  assert.ok(html.includes('value="Camera shop"') && html.includes('value="2026-12-09"') && html.includes("Ordered by Alex"));
+});
+
+test("order card: a ship-to that is not home shows the warning with the address named, a home one does not", () => {
+  const warn = renderOrder(orderGift({ ship_to_id: 2, ship_warning: true }), ADDRESSES, LOCATIONS, false);
+  assert.ok(warn.includes("Ships to Grandparents&#39; house, not home.") && warn.includes('role="alert"'));
+  assert.ok(!renderOrder(orderGift(), ADDRESSES, LOCATIONS, false).includes("not home"));
+  assert.ok(renderOrder(orderGift({ ship_to_id: 2, ship_warning: false, ship_elsewhere_ok: true }), ADDRESSES, LOCATIONS, false).includes(" checked>"));
+});
+
+test("order card: school mode has no hiding place field; everything typed is escaped", () => {
+  assert.ok(!renderOrder(orderGift(), ADDRESSES, LOCATIONS, true).includes('name="location_id"'));
+  assert.ok(renderOrder(orderGift(), ADDRESSES, LOCATIONS, false).includes('name="location_id"'));
+  const evil = renderOrder(orderGift({ seller: EVIL, order_number: `"><script>`, ordered_by: EVIL, ship_to_id: 2, ship_warning: true }),
+    [{ id: 2, label: EVIL, is_home: false }], [{ id: 1, path: EVIL }], false);
+  assert.ok(!evil.includes("<img") && !evil.includes("<script"), evil.slice(0, 120));
+});
+
+test("order card: the gift page draws it only when given the places and only for a gift from an owner", () => {
+  const places = { addresses: ADDRESSES, locations: LOCATIONS, school: false };
+  assert.ok(renderGiftPage(orderGift(), people4, "X", true, places).includes('id="order"'));
+  assert.ok(!renderGiftPage(orderGift(), people4, "X", true).includes('id="order"'), "the old four-argument call is unchanged");
+  assert.ok(!renderGiftPage(orderGift({ track: "theirs", giver_ids: [3], status: "told" }), people4, "X", true, places).includes('id="order"'));
+});
+
+function giftHarness({ school = false, gift = orderGift(), handler }) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const call = { method: init.method, url, body: init.body ? JSON.parse(init.body) : undefined };
+    calls.push(call);
+    const reply = handler(call);
+    if (reply) return { ok: reply[0] < 400, status: reply[0], json: async () => reply[1] };
+    const data = { "/api/addresses": ADDRESSES, "/api/locations": LOCATIONS }[url] ?? gift;
+    return { ok: true, status: 200, json: async () => data };
+  };
+  const toasts = [];
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }), body: { append(m) { toasts.push(m.textContent); } } };
+  const node = (extra = {}) => ({ innerHTML: "", handlers: {}, textContent: "", addEventListener(t, f) { this.handlers[t] = f; }, ...extra });
+  const orderForm = { elements: { seller: { value: "Camera shop" }, order_number: { value: "1234" }, ship_to_id: { value: "2" }, ship_elsewhere_ok: { checked: false }, eta: { value: "2026-12-09" }, arrived_on: { value: "" }, ...(school ? {} : { location_id: { value: "3" } }) } };
+  const els = { "#steps": node(), "#santaBox": node(), "#statusError": node(), "#orderBox": node(), "#order": orderForm, "#orderError": node(), "#fields": node({ elements: {} }), "#formError": node(), "#delete": node() };
+  const view = { innerHTML: "", querySelector: sel => els[sel] ?? null };
+  Object.assign(state, { me: school ? { mode: "school" } : { email: "a@example.com", unlocked: true }, people: people4, occasions: [{ id: 1, name: "Christmas" }] });
+  return { calls, toasts, els, view, ctx: { view, alive: () => true, parts: ["gift", "10"], rerender() {} } };
+}
+const stepTap = status => ({ target: { closest: () => ({ dataset: { status } }) } });
+
+test("gift screen: Mark ordered posts the card's values to /status, and refreshes the card from the answer", async () => {
+  const h = giftHarness({ gift: orderGift({ status: "decided", seller: null, ship_to_id: null, eta: null, ordered_by: null }),
+    handler: c => (c.method === "POST" ? [200, orderGift({ status: "ordered", ordered_by: "Alex" })] : null) });
+  await renderGiftScreen(h.ctx);
+  assert.deepEqual(h.calls.map(c => `${c.method} ${c.url}`).sort(), ["GET /api/addresses", "GET /api/gifts/10", "GET /api/locations"]);
+  assert.ok(h.view.innerHTML.includes('id="order"') && h.view.innerHTML.includes('id="orderBox"'));
+  await h.els["#steps"].handlers.click(stepTap("ordered"));
+  const post = h.calls.at(-1);
+  assert.deepEqual([post.method, post.url], ["POST", "/api/gifts/10/status"]);
+  assert.deepEqual(post.body, { status: "ordered", seller: "Camera shop", order_number: "1234", ship_to_id: 2, ship_elsewhere_ok: false, eta: "2026-12-09", arrived_on: "" });
+  assert.ok(h.els["#orderBox"].innerHTML.includes("Ordered by Alex"));
+});
+
+test("gift screen: a refused Mark ordered shows the server's sentence and sends no location", async () => {
+  const h = giftHarness({ gift: orderGift({ status: "decided" }), handler: c => (c.method === "POST" ? [400, { error: "Marking a gift ordered needs seller, eta.", missing: ["seller", "eta"] }] : null) });
+  await renderGiftScreen(h.ctx);
+  await h.els["#steps"].handlers.click(stepTap("ordered"));
+  assert.equal(h.els["#statusError"].textContent, "Marking a gift ordered needs seller, eta.");
+  assert.ok(!("location_id" in h.calls.at(-1).body));
+});
+
+test("gift screen: other statuses send the status alone; Save order details patches the card, hiding place included", async () => {
+  const h = giftHarness({ handler: c => (c.method === "POST" ? [200, orderGift({ status: "wrapped" })] : c.method === "PATCH" ? [200, orderGift({ location_id: 3 })] : null) });
+  await renderGiftScreen(h.ctx);
+  await h.els["#steps"].handlers.click(stepTap("wrapped"));
+  assert.deepEqual(h.calls.at(-1).body, { status: "wrapped" });
+  await h.els["#orderBox"].handlers.submit({ preventDefault() {} });
+  const patch = h.calls.at(-1);
+  assert.deepEqual([patch.method, patch.url], ["PATCH", "/api/gifts/10"]);
+  assert.deepEqual(patch.body, { seller: "Camera shop", order_number: "1234", ship_to_id: 2, ship_elsewhere_ok: false, eta: "2026-12-09", arrived_on: "", location_id: 3 });
+  assert.deepEqual(h.toasts, ["Saved"]);
+});
+
+test("gift screen: school mode never asks for or sends hiding places", async () => {
+  const h = giftHarness({ school: true, handler: c => (c.method === "PATCH" ? [200, orderGift()] : null) });
+  await renderGiftScreen(h.ctx);
+  assert.ok(!h.calls.some(c => c.url === "/api/locations"), "school mode does not fetch the places");
+  await h.els["#orderBox"].handlers.submit({ preventDefault() {} });
+  assert.ok(!("location_id" in h.calls.at(-1).body));
+});
+
+test("places: parentChoices offers everything except a place and what is inside it", () => {
+  assert.deepEqual(parentChoices(LOCATIONS, 1).map(c => c.label), ["Top level", "Hall closet"]);
+  assert.deepEqual(parentChoices(LOCATIONS, 2).map(c => c.label), ["Top level", "Garage", "Hall closet"]);
+  assert.deepEqual(parentChoices(LOCATIONS, 4).map(c => c.label), ["Top level", "Garage", "Garage › Top shelf", "Garage › Top shelf › Blue bin"]);
+  assert.equal(parentChoices(LOCATIONS, null).length, 5, "a new place may go anywhere");
+});
+
+test("places: the home address cannot be deleted or made home again; hiding places show by path; school mode has none", () => {
+  const html = renderAddresses(ADDRESSES);
+  const [home, other] = html.split("</li>");
+  assert.ok(home.includes("home</span>") && !home.includes("make-home") && !home.includes("delete-address"));
+  assert.ok(other.includes('data-act="make-home" data-id="2"') && other.includes('data-act="delete-address" data-id="2"'));
+  const locs = renderLocations(LOCATIONS);
+  assert.ok(locs.includes("Garage › Top shelf › Blue bin") && locs.includes('data-act="move" data-id="2"'));
+  assert.ok(locs.includes('<option value="1" selected>Garage</option>'), "the move menu shows the current parent");
+  assert.ok(renderPlaces(ADDRESSES, LOCATIONS, false).includes("Hiding places"));
+  assert.ok(!renderPlaces(ADDRESSES, LOCATIONS, true).includes("Hiding places"));
+  const evil = renderPlaces([{ id: 5, label: EVIL, is_home: false }], [{ id: 1, parent_id: null, name: EVIL, path: EVIL }], false);
+  assert.ok(!evil.includes("<img"));
+});
+
+function placesHarness(school = false) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(`${init.method} ${url}${init.body && init.body !== "{}" ? ` ${init.body}` : ""}`);
+    return { ok: true, status: 200, json: async () => (url === "/api/addresses" ? ADDRESSES : url === "/api/locations" ? LOCATIONS : { ok: true }) };
+  };
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }), body: { append() {} } };
+  Object.assign(state, { me: school ? { mode: "school" } : { email: "a@example.com" } });
+  const view = { innerHTML: "", handlers: {}, addEventListener(t, f) { this.handlers[t] = f; } };
+  let redraws = 0;
+  return { calls, view, redraws: () => redraws, ctx: { view, alive: () => true, rerender() { redraws += 1; } } };
+}
+const btn = (act, id, label) => ({ target: { closest: sel => (sel === "[data-act]" ? { dataset: { act, id: String(id), label } } : null) } });
+
+test("places screen: each button sends one request and redraws; school mode asks only for addresses", async () => {
+  const h = placesHarness();
+  await renderPlacesScreen(h.ctx);
+  assert.deepEqual(h.calls.slice().sort(), ["GET /api/addresses", "GET /api/locations"]);
+  h.calls.length = 0;
+  await h.view.handlers.click(btn("make-home", 2));
+  globalThis.confirm = () => true;
+  await h.view.handlers.click(btn("delete-address", 2));
+  await h.view.handlers.click(btn("delete-location", 3));
+  globalThis.prompt = () => " Attic ";
+  await h.view.handlers.click(btn("rename-location", 4, "Hall closet"));
+  assert.deepEqual(h.calls, ["PATCH /api/addresses/2 {\"is_home\":true}", "DELETE /api/addresses/2", "DELETE /api/locations/3", "PATCH /api/locations/4 {\"name\":\" Attic \"}"]);
+  assert.equal(h.redraws(), 4);
+  globalThis.confirm = () => false;
+  await h.view.handlers.click(btn("delete-location", 1));
+  assert.equal(h.calls.length, 4, "declining the confirmation sends nothing");
+  await h.view.handlers.change({ target: { closest: () => ({ dataset: { act: "move", id: "3" }, value: "" }) } });
+  await h.view.handlers.change({ target: { closest: () => ({ dataset: { act: "move", id: "3" }, value: "4" }) } });
+  assert.deepEqual(h.calls.slice(4), ['PATCH /api/locations/3 {"parent_id":null}', 'PATCH /api/locations/3 {"parent_id":4}']);
+  const add = { preventDefault() {}, target: { dataset: { form: "location-add" }, elements: { name: { value: "Attic" }, parent_id: { value: "" } } } };
+  await h.view.handlers.submit(add);
+  assert.equal(h.calls.at(-1), 'POST /api/locations {"name":"Attic","parent_id":null}');
+  const s = placesHarness(true);
+  await renderPlacesScreen(s.ctx);
+  assert.deepEqual(s.calls, ["GET /api/addresses"]);
+});
