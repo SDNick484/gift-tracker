@@ -707,3 +707,94 @@ test("school screen: a new occasion with no staff, and no occasion at all, draw 
   await renderSchoolScreen({ view: none, alive: () => true });
   assert.ok(none.innerHTML.includes("No occasion yet"));
 });
+
+
+// ---------------------------------------------------------------- after purchase: the lists and the counts on home
+import { names as listNames, render as renderListsScreen, renderPending, renderTabs, renderToWrap, renderWhere, shortDate, tabKey, tabsFor } from "../static/js/lists.js";
+import { renderCounts } from "../static/js/home.js";
+
+const EVIL = `<img src=x onerror=alert(1)>`;
+const listPeople = [{ id: 1, name: "Jordan", color: "#1f4d3a" }, { id: 2, name: `<b>Riley</b>`, color: "#3a5f9a" }];
+const pendingGift = (extra = {}) => ({ id: 7, title: "Camera", status: "ordered", recipient_ids: [1], seller: "Camera shop", order_number: "1234", eta: "2026-12-09", arrived_on: null, ship_to_id: 1, ship_warning: false, overdue: false, location_id: null, location_path: null, ...extra });
+
+test("lists: the counts row names the three lists, links them and gives Where is it? no number", () => {
+  const html = renderCounts({ pending: 3, to_wrap: 9 });
+  assert.ok(html.includes('<a href="#/lists/pending">Not here yet 3</a>') && html.includes('<a href="#/lists/to-wrap">To wrap 9</a>'));
+  assert.ok(html.includes('<a href="#/lists/where">Where is it?</a>'));
+  const summary = { occasion: { id: 1 }, days_until: 3, groups: [], protected: { locked: true, people: [] } };
+  assert.ok(!renderHome(summary, [{ id: 1, name: "X", archived: false }], false).includes('class="counts"'), "no counts given: the old home");
+  const home = renderHome(summary, [{ id: 1, name: "X", archived: false }], false, { pending: 0, to_wrap: 2 });
+  assert.ok(home.indexOf("Idea</a>") < home.indexOf('class="counts"') && home.includes("To wrap 2"));
+});
+
+test("lists: shortDate, names and the tab set", () => {
+  assert.equal(shortDate("2026-12-09"), "Dec 9");
+  assert.equal(shortDate("2027-01-31"), "Jan 31");
+  assert.equal(shortDate(null), "no date");
+  assert.equal(shortDate("soon"), "soon");
+  assert.equal(listNames([1, 2, 99], listPeople), "Jordan & <b>Riley</b>");
+  assert.deepEqual(tabsFor(false).map(t => t.key), ["pending", "to-wrap", "where"]);
+  assert.deepEqual(tabsFor(true).map(t => t.key), ["pending", "to-wrap"], "school mode has no hiding places");
+  assert.equal(tabKey("where", true), "pending");
+  assert.equal(tabKey("where", false), "where");
+  assert.equal(tabKey("nonsense", false), "pending");
+  const bar = renderTabs("to-wrap", false);
+  assert.ok(bar.includes('href="#/lists/to-wrap" aria-current="page"') && !bar.includes('href="#/lists/pending" aria-current'));
+  assert.ok(!renderTabs("pending", true).includes("Where is it?"));
+});
+
+test("lists: a row turns red and says overdue when its date has passed, and warns when it ships elsewhere", () => {
+  const html = renderPending({ gifts: [pendingGift({ overdue: true, ship_warning: true }), pendingGift({ id: 8, title: "Later", eta: null })] }, listPeople);
+  const [first, second] = html.split("</li>");
+  assert.ok(first.includes('class="row overdue"') && first.includes("overdue</span>") && first.includes("ships elsewhere"));
+  assert.ok(first.includes("Dec 9") && first.includes("Camera shop #1234") && first.includes("to Jordan"));
+  assert.ok(second.includes('class="row"') && !second.includes("overdue") && second.includes("no date") && !second.includes("ships elsewhere"));
+  assert.ok(renderPending({ gifts: [] }, listPeople).includes("Nothing on its way."));
+});
+
+test("lists: To wrap groups by recipient with the place, Where is it? by place, and nothing typed is left unescaped", () => {
+  const wrap = renderToWrap({ groups: [{ person_id: 1, gifts: [pendingGift({ title: EVIL, location_path: `Garage › ${EVIL}` }), pendingGift({ id: 9, title: "Scarf", location_path: null })] }, { person_id: 2, gifts: [pendingGift({ id: 10 })] }] }, listPeople);
+  assert.ok(wrap.includes('data-color="#1f4d3a"') && wrap.includes("<h3>Jordan</h3>") && wrap.includes("&lt;b&gt;Riley&lt;/b&gt;"));
+  assert.ok(wrap.includes("no hiding place yet") && wrap.includes("Garage › &lt;img"));
+  const where = renderWhere({ groups: [{ location_id: 3, path: `Hall ${EVIL}`, gifts: [pendingGift({ title: EVIL, status: "wrapped", recipient_ids: [2] })] }, { location_id: null, path: null, gifts: [pendingGift()] }] }, listPeople);
+  assert.ok(where.includes("No place yet") && where.includes("wrapped") && where.includes("&lt;b&gt;Riley&lt;/b&gt;"));
+  const pending = renderPending({ gifts: [pendingGift({ title: EVIL, seller: EVIL, order_number: EVIL, recipient_ids: [2] })] }, listPeople);
+  for (const html of [wrap, where, pending]) assert.ok(!html.includes("<img") && !html.includes("<b>"), "raw markup in: " + html.slice(0, 80));
+  assert.ok(renderToWrap({ groups: [] }, listPeople).includes("Nothing to wrap."));
+  assert.ok(renderWhere({ groups: [] }, listPeople).includes("Nothing is in the house yet."));
+});
+
+test("lists: a school list has no location keys, so it names no place", () => {
+  const g = pendingGift();
+  delete g.location_id; delete g.location_path;
+  const html = renderToWrap({ groups: [{ person_id: 1, gifts: [g] }] }, listPeople);
+  assert.ok(!html.includes("no hiding place yet"));
+});
+
+function listHarness(school) {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(`${init.method} ${url}`);
+    return { ok: true, status: 200, json: async () => (url.endsWith("to-wrap") || url.endsWith("where") ? { groups: [] } : { gifts: [] }) };
+  };
+  Object.assign(state, { me: school ? { mode: "school" } : { email: "a@example.com" }, occasionId: 9, people: listPeople, occasions: [{ id: 9, name: `<i>Christmas</i>`, archived: false }] });
+  return { calls, view: { innerHTML: "" }, ctx: view => ({ view, alive: () => true, parts: [] }) };
+}
+
+test("lists screen: each tab asks for its own list; an unknown tab, and where in school mode, fall back to Not here yet", async () => {
+  const h = listHarness(false);
+  for (const [part, url] of [["pending", "pending"], ["to-wrap", "to-wrap"], ["where", "where"], ["bogus", "pending"], [undefined, "pending"]]) {
+    h.calls.length = 0;
+    await renderListsScreen({ view: h.view, alive: () => true, parts: ["lists", part] });
+    assert.deepEqual(h.calls, [`GET /api/occasions/9/lists/${url}`], String(part));
+  }
+  assert.ok(h.view.innerHTML.includes("&lt;i&gt;Christmas&lt;/i&gt;") && h.view.innerHTML.includes("Where is it?"));
+  const s = listHarness(true);
+  await renderListsScreen({ view: s.view, alive: () => true, parts: ["lists", "where"] });
+  assert.deepEqual(s.calls, ["GET /api/occasions/9/lists/pending"]);
+  assert.ok(!s.view.innerHTML.includes("Where is it?"));
+  state.occasionId = null;
+  const none = { innerHTML: "" };
+  await renderListsScreen({ view: none, alive: () => true, parts: ["lists"] });
+  assert.ok(none.innerHTML.includes("No occasion yet"));
+});

@@ -64,7 +64,11 @@ const renderEmpty = summary => (summary.groups.length || summary.protected.peopl
   ? ""
   : `<p class="empty">No one is in this occasion yet. Add people in <a href="#/settings">Settings</a>.</p>`);
 
-export const renderHome = (summary, occasions, anyProtected) => `
+// "Not here yet 3 · To wrap 9 · Where is it?": links to the three lists. Where is it? has no number, as in the spec.
+export const renderCounts = c => `<p class="counts"><a href="#/lists/pending">Not here yet ${esc(c.pending)}</a> · <a href="#/lists/to-wrap">To wrap ${esc(c.to_wrap)}</a> · <a href="#/lists/where">Where is it?</a></p>`;
+const renderCountsRow = c => (c ? renderCounts(c) : "");
+
+export const renderHome = (summary, occasions, anyProtected, counts = null) => `
   <div class="head">
     <div class="picker">
       <select id="occasion" aria-label="Occasion">${renderOptions(occasionChoices(occasions), summary.occasion.id)}</select>
@@ -72,6 +76,7 @@ export const renderHome = (summary, occasions, anyProtected) => `
     </div>
   </div>
   <a class="btn primary big-add" href="#/idea">${renderIcon("plus")} Idea</a>
+  ${renderCountsRow(counts)}
   ${renderProtectedSection(summary, anyProtected)}
   <div class="cols">${renderGroups(summary.groups)}</div>
   ${renderEmpty(summary)}`;
@@ -84,10 +89,11 @@ export async function render(ctx) {
     view.innerHTML = renderNoOccasion();
     return;
   }
-  const summary = await get(`/api/occasions/${state.occasionId}/summary`);
+  const [summary, counts] = await Promise.all([get(`/api/occasions/${state.occasionId}/summary`),
+    get(`/api/occasions/${state.occasionId}/lists/counts`)]);
   if (!ctx.alive()) return;
   const anyProtected = state.people.some(p => p.active && p.protected);
-  view.innerHTML = renderHome(summary, state.occasions, anyProtected);
+  view.innerHTML = renderHome(summary, state.occasions, anyProtected, counts);
   view.querySelector("#occasion").addEventListener("change", e => {
     setOccasion(Number(e.target.value));
     ctx.rerender();

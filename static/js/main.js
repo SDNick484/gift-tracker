@@ -13,6 +13,7 @@ const SCREENS = {
   person: () => import("./person.js"),
   gift: () => import("./gift.js"),
   board: () => import("./board.js"),
+  lists: () => import("./lists.js"),
   settings: () => import("./settings.js"),
 };
 
