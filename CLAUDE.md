@@ -27,6 +27,7 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
 - A new setting goes in `settings.py`, `.env.example` and the installer's settings list.
 - A schema change bumps `db.SCHEMA_VERSION` and adds a step to `db.MIGRATIONS` (which `migrate()` runs).
 - A new `/api/` GET route must pass `tests/test_privacy.py` (once that exists).
+- A new route of any kind stays behind the identity guard: `tests/test_identity.py` walks `app.url_map` and expects 403 from the LAN everywhere but `/healthz`.
 
 ## File structure
 
@@ -57,10 +58,14 @@ Not every file exists yet; the plan says which task creates each.
 
 - `db.connect()` opens connections in autocommit mode (`isolation_level=None`) with foreign keys on and WAL. A single statement commits by itself; wrap anything that must be atomic in `with db.transaction(con):` (`BEGIN IMMEDIATE`).
 - `app.db()` is the per-request connection in `flask.g`. `app.init_db()` runs `migrate()` at import, so every start migrates.
+- `identity.resolve_user(headers, remote_addr)` returns `{"email", "name"}` or `None`. The `before_request` guard in `app.py` turns `None` into 403 `{"error": "Forbidden"}` on every path except `/healthz`, then applies the mutation guard to every `/api/` request that is not GET or HEAD.
+- Raise `common.ApiError(status, message)` from routes and modules; it becomes `{"error": message}`.
 
 ## Tests
 
 - `tests/conftest.py` sets the environment before importing `app`, and gives every test a fresh database (`client`, `con`).
+- Cloudflare is simulated: `identity._jwk_client` is stubbed with a test RSA key. `auth(email)` returns Cloudflare headers with a signed JWT (keyword arguments `aud`, `iss`, `exp`, `key` forge bad ones); `mut(email)` adds `X-Tracker: 1`, a same-origin `Origin` and a JSON content type.
+- The Flask test client's default remote address is `127.0.0.1`; `conftest.py` clears `DEV_EMAIL` so loopback is not admitted by accident. Use `environ_base={"REMOTE_ADDR": "192.0.2.50"}` for a LAN request.
 
 ## Verification gate
 

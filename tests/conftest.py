@@ -4,6 +4,8 @@ import os
 import shutil
 import sys
 import tempfile
+import time
+import types
 
 import pytest
 
@@ -20,9 +22,42 @@ for name in ("TRACKER_PORT", "APP_NAME", "LOCK_IDLE_SECONDS"):
     os.environ.pop(name, None)  # test the defaults
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import jwt  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+
 import app as tracker  # noqa: E402
 import db  # noqa: E402
+import identity  # noqa: E402
 import settings  # noqa: E402
+
+KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+# Stand in for Cloudflare's JWKS endpoint: always hand back the test public key.
+identity._jwk_client = types.SimpleNamespace(
+    get_signing_key_from_jwt=lambda _t: types.SimpleNamespace(key=KEY.public_key()))
+
+LAN_IP = "192.0.2.50"     # RFC 5737
+ORIGIN = "http://localhost"  # the Flask test client's host
+
+
+def token(email, key=KEY, aud="aud-test", iss="https://family.cloudflareaccess.com", exp=3600, **claims):
+    """A Cloudflare Access JWT. exp is seconds from now; exp=None leaves the claim out."""
+    payload = {"email": email, "aud": aud, "iss": iss, "iat": int(time.time()), **claims}
+    if exp is not None:
+        payload["exp"] = int(time.time()) + exp
+    return jwt.encode(payload, key, algorithm="RS256")
+
+
+def auth(email="alex@example.com", **kw):
+    """Headers of a request that came through Cloudflare Access signed in as `email`."""
+    return {"Cf-Ray": "test", "Cf-Access-Authenticated-User-Email": email,
+            "Cf-Access-Jwt-Assertion": token(email, **kw)}
+
+
+def mut(email="alex@example.com", **kw):
+    """auth() plus what every mutation needs: the CSRF header, a same-origin Origin and a JSON content type."""
+    return {**auth(email, **kw), "X-Tracker": "1", "Origin": ORIGIN, "Content-Type": "application/json"}
 
 
 @pytest.fixture(autouse=True)
