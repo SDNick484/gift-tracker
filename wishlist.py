@@ -509,3 +509,154 @@ def set_alias(con, data: dict) -> tuple[dict, bool]:
 def delete_alias(con, alias_id: int) -> None:
     if not con.execute("DELETE FROM wishlist_aliases WHERE id = ?", (alias_id,)).rowcount:
         raise ApiError(404, "No such alias.")
+
+
+# ---------------------------------------------------------------- writing back
+def _listed(con, gift_id: int) -> dict | None:
+    """The cached wish a gift is linked to, when the link is on and the wish is in the cache; else None, and every
+    write of the gift is local only (an off-list gift, a gift typed in by hand, the link off, school mode)."""
+    if not enabled():
+        return None
+    row = con.execute("SELECT wishlist_item_id FROM gifts WHERE id = ?", (gift_id,)).fetchone()
+    return item(con, row[0]) if row and row[0] is not None else None
+
+
+def _effect(action: str, payload: dict) -> dict:
+    """What an accepted write does to the item (the contract), for the cache."""
+    if action == "reserve":
+        return {"reserved_by": payload["by"], "reserved_by_email": None}
+    if payload["purchased"]:
+        return {"purchased": True, "purchased_by": payload["by"], "purchased_by_email": None, "reserved_by": None,
+                "reserved_by_email": None}
+    return {"purchased": False, "purchased_by": None, "purchased_by_email": None}
+
+
+def _plan(con, it: dict, want_purchased: bool, by: str | None) -> list[tuple[str, dict, list]]:
+    """The writes that take the wish from what the cache shows (`it`) to what the gift says, each with the writes
+    that take it back: [(action, payload, inverse)]. Empty when the wishlist already agrees. A reservation or purchase
+    by a signed-in shopper (an email on it) is never ours to change: wanting the wish then is a Conflict."""
+    ours_reserved = it["reserved_by"] is not None and not it["reserved_by_email"]
+    current = it["reserved_by"]
+    ops = []
+    if it["purchased"]:
+        if it["purchased_by_email"]:
+            if want_purchased or by:
+                raise Conflict()
+            return []
+        if want_purchased and it["purchased_by"] == by:
+            return []
+        old = it["purchased_by"] or by or us_label(con)
+        ops.append(("purchase", {"by": old, "purchased": False}, [("purchase", {"by": old, "purchased": True})]))
+        ours_reserved, current = False, None  # the purchase ended any reservation
+    if want_purchased:
+        back = [("purchase", {"by": by, "purchased": False})] + ([("reserve", {"by": current})] if ours_reserved else [])
+        return ops + [("purchase", {"by": by, "purchased": True}, back)]
+    if by is None:
+        return ops + ([("reserve", {"by": None}, [("reserve", {"by": current})])] if ours_reserved else [])
+    if ours_reserved and current == by:
+        return ops
+    return ops + [("reserve", {"by": by}, [("reserve", {"by": current if ours_reserved else None})])]
+
+
+class _Undo:
+    """The writes the wishlist accepted (or may have: a timeout), and how to take each back, newest first."""
+
+    def __init__(self, item_id: int):
+        self.item_id, self.steps = item_id, []
+
+    def send(self, con, action: str, payload: dict, inverse: list) -> None:
+        try:
+            _write(self.item_id, action, payload)
+        except Unreachable:
+            self.steps.append(inverse)  # the request may have arrived and only the answer been lost
+            raise
+        self.steps.append(inverse)
+        _patch_cache(con, self.item_id, **_effect(action, payload))
+
+    def run(self) -> None:
+        for inverse in reversed(self.steps):
+            for action, payload in inverse:
+                try:
+                    _write(self.item_id, action, payload)
+                except (Unreachable, Conflict, Gone):
+                    log.warning("wishlist: could not take back a change to item %d after a failure", self.item_id)
+        self.steps = []
+
+
+def _sync(con, gift_id: int, undo: _Undo) -> None:
+    """Inside the writer's transaction, after its local write: make the wishlist show what the gift now says."""
+    it = item(con, undo.item_id)
+    if it is None:
+        return
+    want, by = _expected(con, gift_id)
+    for action, payload, inverse in _plan(con, it, want, by):
+        undo.send(con, action, payload, inverse)
+
+
+def _write_through(con, gift_id: int, write, sync=_sync) -> None:
+    """Run `write(after_write)` (a writer with its own transaction) with `sync` keeping the wishlist in step inside that
+    transaction, or plainly when the gift is not on the wishlist. Any failure after the wishlist accepted a change
+    takes that change back. A refusal is 409 (and the cache is refetched), an unreachable wishlist 503; in every
+    failure nothing local changed."""
+    it = _listed(con, gift_id)
+    if it is None:
+        return write(None)
+    undo = _Undo(it["id"])
+    try:
+        return write(lambda: sync(con, gift_id, undo))
+    except BaseException as exc:
+        undo.run()
+        if isinstance(exc, Conflict):
+            refresh(con)
+            raise ApiError(409, CONFLICT) from None
+        if isinstance(exc, Gone):
+            refresh(con)
+            raise ApiError(409, GONE) from None
+        if isinstance(exc, Unreachable):
+            _mark_failed(con)
+            raise ApiError(503, UNREACHABLE) from None
+        raise
+
+
+def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int]) -> None:
+    """boards.assign, and the wish reserved under the new givers' label (released when unassigned)."""
+    _write_through(con, gift_id, lambda hook: boards.assign(con, gift_id, giver_ids, expected_giver_ids, after_write=hook))
+
+
+def set_status(con, gift_id: int, status: str, order: dict | None, actor: str | None) -> None:
+    """gifts.set_status, and the wish marked purchased (or not) to match: purchased when the gift is from someone
+    else and confirmed or given."""
+    _write_through(con, gift_id, lambda hook: gifts.set_status(con, gift_id, status, order, actor, after_write=hook))
+
+
+def update(con, gift_id: int, data: dict, actor: str | None) -> None:
+    """gifts.update (PATCH), with the wishlist kept in step when it changes the givers or the status. Santa and every
+    other field change nothing there, so nothing is sent for them."""
+    _write_through(con, gift_id, lambda hook: gifts.update(con, gift_id, data, actor=actor, after_write=hook))
+
+
+def delete_gift(con, gift_id: int) -> None:
+    """gifts.delete, releasing a reservation the feed holds for the gift's wish. A purchase stays: it happened."""
+    def write(hook):
+        with db.transaction(con):
+            gifts.delete(con, gift_id)
+            if hook:
+                hook()
+    _write_through(con, gift_id, write, sync=_release)
+
+
+def _release(con, _gift_id: int, undo: _Undo) -> None:
+    it = item(con, undo.item_id)
+    if it and not it["purchased"] and it["reserved_by"] is not None and not it["reserved_by_email"]:
+        undo.send(con, "reserve", {"by": None}, [("reserve", {"by": it["reserved_by"]})])
+
+
+def refuse_agent_flip(con, gift_id: int, status) -> None:
+    """/api/v1 never writes to the wishlist: a status that would mark a listed wish purchased or not purchased is 409."""
+    if not isinstance(status, str) or _listed(con, gift_id) is None:
+        return
+    row = gifts.get(con, gift_id)
+    if gifts.track(set(gifts._ids(con, "gift_givers", gift_id)), people.user_person_ids(con)) != "theirs":
+        return
+    if (row["status"] in PURCHASED) != (status in PURCHASED):
+        raise ApiError(409, "This gift is on the wishlist: change its status in the app.")

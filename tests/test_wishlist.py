@@ -10,17 +10,22 @@ import logging
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import pytest
 
+import db
+import gifts
 import settings
 import wishlist
-from conftest import auth, con_rows, mut
+from common import ApiError
+from conftest import auth, bearer, con_rows, mk_token, mut
 from test_privacy import world  # noqa: F401  (a fixture: tests/test_privacy.py's data, for its walk)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -49,13 +54,14 @@ def default_feed():
 
 
 def check_request(req):
-    """What every outbound request must look like, whichever test made it."""
-    base = urlsplit(settings.WISHLIST_URL)
+    """What every outbound request must look like, whichever test made it. `base` and `token` are the settings at the
+    time of the request (the last test re-checks every request after the settings are restored)."""
+    base = urlsplit(req["base"])
     assert (req["scheme"], req["host"], req["port"]) == (base.scheme, base.hostname, base.port), req
     assert req["path"].startswith(base.path) and PATHS.fullmatch(req["path"][len(base.path):]), req["path"]
     assert req["query"] == "" and "?" not in req["url"], req["url"]
     assert set(req["headers"]) <= {"Authorization", "Accept", "Content-Type"}, req["headers"]
-    assert req["headers"]["Authorization"] == f"Bearer {settings.WISHLIST_TOKEN}"
+    assert req["headers"]["Authorization"] == f"Bearer {req['token']}"
     if req["method"] == "GET":
         assert req["body"] is None and req["path"].endswith("/api/feed")
         return
@@ -95,7 +101,8 @@ class StubWishlist:
         u = urlsplit(url)
         req = {"method": method, "url": url, "scheme": u.scheme, "host": u.hostname, "port": u.port, "path": u.path,
                "query": u.query, "headers": dict(headers), "raw": body, "timeout": timeout,
-               "body": json.loads(body) if body is not None else None}
+               "body": json.loads(body) if body is not None else None, "base": settings.WISHLIST_URL,
+               "token": settings.WISHLIST_TOKEN}
         REQUESTS.append(req)
         self.requests.append(req)
         check_request(req)
@@ -665,3 +672,342 @@ def test_the_wishlist_routes_are_in_the_privacy_walk():
     walked = {r.endpoint for r in api_rules({"GET", "POST", "PUT", "PATCH", "DELETE"})}
     assert {"wishlist_overview", "wishlist_refresh", "wishlist_add_wish", "wishlist_aliases_list", "wishlist_alias_set",
             "wishlist_alias_delete"} <= walked
+
+
+# ---------------------------------------------------------------- writing back
+RESERVE, PURCHASE = "/api/feed/items/11/reserve", "/api/feed/items/11/purchase"
+
+
+@pytest.fixture
+def lego(client, ids, wl, unlock):
+    """Kid 1's tab linked, the board loaded once (the cache), and the Lego wish on the board as an unassigned gift."""
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    board(client, ids)
+    r = add(client, ids, 11)
+    assert r.status_code == 201
+    return r.get_json()["id"]
+
+
+def assign(client, gift_id, givers, expected):
+    return client.post(f"/api/gifts/{gift_id}/assign", json={"giver_ids": givers, "expected_giver_ids": expected}, headers=mut())
+
+
+def gift(client, gift_id):
+    return client.get(f"/api/gifts/{gift_id}", headers=auth()).get_json()
+
+
+def local(gift_id):
+    """Everything local about the gift that a failed write must leave alone."""
+    return (con_rows("SELECT status, santa, told_at, wishlist_item_id FROM gifts WHERE id = ?", gift_id),
+            con_rows("SELECT person_id FROM gift_givers WHERE gift_id = ? ORDER BY person_id", gift_id))
+
+
+def status(client, gift_id, value):
+    return client.post(f"/api/gifts/{gift_id}/status", json={"status": value}, headers=mut())
+
+
+def test_assigning_reserves_under_the_household_label(client, ids, wl, lego):
+    for pid in (ids.jordan, ids.riley):
+        client.patch(f"/api/people/{pid}", json={"household": "Riley House"}, headers=mut())
+    r = assign(client, lego, [ids.jordan], [])
+    assert r.status_code == 200 and r.get_json()["status"] == "told"
+    assert wl.posts() == [(RESERVE, {"by": "Riley House"})]
+    assert wl.item(11)["reserved_by"] == "Riley House"
+    [grp] = board(client, ids)["givers"]
+    assert grp["gifts"][0]["wish"] == {"item_id": 11, "listed": True, "reserved_by": "Riley House", "purchased": False,
+                                       "purchased_by": None, "in_sync": True}
+    assert assign(client, lego, [ids.riley], [ids.jordan]).status_code == 200  # same household: nothing to send
+    assert len(wl.posts()) == 1
+    assert assign(client, lego, [ids.casey], [ids.riley]).status_code == 200
+    assert wl.posts()[-1] == (RESERVE, {"by": "Casey"})
+
+
+def test_the_owners_label_is_identical_with_and_without_santa(client, ids, wl, unlock):
+    """Review Focus 1: one owner, the other, both, Santa or not: always the household label, and Santa sends nothing."""
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    wl.feed["people"][0]["items"] += [wish(13, "Kite"), wish(14, "Drum")]
+    board(client, ids)
+    a, b, c = (add(client, ids, i).get_json()["id"] for i in (11, 12, 13))
+    assert assign(client, a, [ids.alex], []).status_code == 200                                  # Alex, no Santa
+    r = client.patch(f"/api/gifts/{b}", json={"giver_ids": [ids.sam], "santa": True}, headers=mut())  # Sam, Santa
+    assert r.status_code == 200 and r.get_json()["santa"] is True
+    r = client.patch(f"/api/gifts/{c}", json={"giver_ids": [ids.alex, ids.sam], "santa": True}, headers=mut())  # both, Santa
+    assert r.status_code == 200 and r.get_json()["santa"] is True
+    bodies = [body for _path, body in wl.posts()]
+    assert bodies == [{"by": "Us"}, {"by": "Us"}, {"by": "Us"}]
+    sent = len(wl.requests)
+    for value in (True, False, True):
+        assert client.patch(f"/api/gifts/{a}", json={"santa": value}, headers=mut()).status_code == 200
+    assert assign(client, a, [ids.sam], [ids.alex]).status_code == 200            # Alex to Sam: same label
+    assert assign(client, a, [ids.alex, ids.sam], [ids.sam]).status_code == 200    # to both: same label
+    assert len(wl.requests) == sent
+    assert {wl.item(i)["reserved_by"] for i in (11, 12, 13)} == {"Us"}
+    assert all("santa" not in json.dumps(r["body"]).lower() for r in wl.requests if r["body"])
+
+
+def test_unassigning_releases(client, ids, wl, lego):
+    assign(client, lego, [ids.jordan], [])
+    r = assign(client, lego, [], [ids.jordan])
+    assert r.status_code == 200 and r.get_json()["status"] == "idea"
+    assert wl.posts()[-1] == (RESERVE, {"by": None})
+    assert wl.item(11)["reserved_by"] is None
+
+
+def test_a_409_from_the_wishlist_is_409_changes_nothing_and_refreshes(client, ids, wl, lego):
+    wl.item(11).update(reserved_by="Pat", reserved_by_email="pat@example.com")  # the cache still says open
+    before, gets = local(lego), len(wl.gets())
+    r = assign(client, lego, [ids.jordan], [])
+    assert (r.status_code, r.get_json()) == (409, {"error": "Someone else has this on the wishlist. Reload."})
+    assert local(lego) == before
+    assert len(wl.gets()) == gets + 1  # refetched
+    assert board(client, ids)["unassigned"][0]["wish"]["reserved_by"] == "Pat"
+
+
+def test_unreachable_is_503_and_changes_nothing(client, ids, wl, clock, lego):
+    before = local(lego)
+    wl.down = True
+    r = assign(client, lego, [ids.jordan], [])
+    assert (r.status_code, r.get_json()) == (503, {"error": "The wishlist cannot be reached. Nothing was changed."})
+    assert local(lego) == before
+    assert con_rows("SELECT failed_at FROM wishlist_cache") == [(clock.t,)]
+    assert board(client, ids)["wishlist"]["reachable"] is False
+    # The reserve may have arrived with only its answer lost, so the release was tried too; nothing is queued.
+    assert wl.posts() == [(RESERVE, {"by": "Jordan"}), (RESERVE, {"by": None})]
+    wl.down = False
+    assert assign(client, lego, [ids.jordan], []).status_code == 200
+
+
+def test_a_removed_wish_is_409_and_becomes_off_list(client, ids, wl, lego):
+    wl.feed["people"][0]["items"] = [it for it in wl.feed["people"][0]["items"] if it["id"] != 11]
+    before = local(lego)
+    r = assign(client, lego, [ids.jordan], [])
+    assert (r.status_code, r.get_json()) == (409, {"error": "This wish is no longer on the wishlist. Reload."})
+    assert local(lego)[1] == before[1]
+    assert con_rows("SELECT wishlist_item_id, title FROM gifts WHERE id = ?", lego) == [(None, "Lego set")]  # off the list
+    sent = len(wl.requests)
+    assert assign(client, lego, [ids.jordan], []).status_code == 200
+    assert len(wl.requests) == sent  # an off-list gift is the tracker's alone
+
+
+def test_a_local_failure_after_a_reserve_releases_it(client, ids, wl, lego, monkeypatch):
+    """Review Focus 2: the reserve was accepted, then the local side failed (here the cache write after it)."""
+    before = local(lego)
+
+    def broken(*_a, **_k):
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(wishlist, "_patch_cache", broken)
+    r = assign(client, lego, [ids.jordan], [])
+    assert r.status_code == 500
+    assert wl.posts() == [(RESERVE, {"by": "Jordan"}), (RESERVE, {"by": None})]
+    assert wl.item(11)["reserved_by"] is None
+    assert local(lego) == before
+
+
+def test_a_local_failure_after_a_relabel_restores_the_old_label(client, ids, wl, lego, monkeypatch):
+    assign(client, lego, [ids.jordan], [])
+    before = local(lego)
+
+    @contextmanager
+    def failing_commit(con, mode="IMMEDIATE"):
+        con.execute(f"BEGIN {mode}")
+        try:
+            yield con
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+        con.execute("ROLLBACK")
+        raise sqlite3.OperationalError("database or disk is full")
+    monkeypatch.setattr(db, "transaction", failing_commit)
+    r = assign(client, lego, [ids.casey], [ids.jordan])
+    assert r.status_code == 500
+    assert wl.posts()[-2:] == [(RESERVE, {"by": "Casey"}), (RESERVE, {"by": "Jordan"})]
+    assert wl.item(11)["reserved_by"] == "Jordan"
+    assert local(lego) == before
+
+
+def test_a_failure_on_the_second_write_takes_back_the_first(client, ids, wl, lego):
+    """A confirmed gift reassigned to us: un-purchase, then reserve. The reserve is refused, so the purchase comes back."""
+    assign(client, lego, [ids.jordan], [])
+    status(client, lego, "confirmed")
+    before = local(lego)
+
+    def snatch():
+        if wl.item(11)["purchased"] is False and wl.item(11)["reserved_by"] is None:
+            wl.item(11).update(reserved_by="Pat", reserved_by_email="pat@example.com")
+    wl.after = snatch
+    r = assign(client, lego, [ids.alex], [ids.jordan])
+    assert r.status_code == 409
+    assert wl.posts()[-3:] == [(PURCHASE, {"by": "Jordan", "purchased": False}), (RESERVE, {"by": "Us"}),
+                               (PURCHASE, {"by": "Jordan", "purchased": True})]
+    assert local(lego) == before
+
+
+def test_two_owners_assigning_at_once_make_one_request(client, ids, wl, lego, monkeypatch):
+    real = gifts._set_givers
+
+    def slow(con, gift_id, giver_ids):
+        time.sleep(0.3)
+        real(con, gift_id, giver_ids)
+    monkeypatch.setattr(gifts, "_set_givers", slow)
+    start, results = threading.Barrier(2), {}
+
+    def run(name, givers):
+        con = db.connect(settings.DB_PATH)
+        try:
+            start.wait()
+            wishlist.assign(con, lego, givers, [])
+            results[name] = "ok"
+        except ApiError as e:
+            results[name] = e.status
+        finally:
+            con.close()
+    threads = [threading.Thread(target=run, args=("a", [ids.jordan])), threading.Thread(target=run, args=("b", [ids.casey]))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results.values(), key=str) == [409, "ok"]
+    winner = "Jordan" if results["a"] == "ok" else "Casey"
+    assert wl.posts() == [(RESERVE, {"by": winner})]
+    assert wl.item(11)["reserved_by"] == winner
+
+
+def test_confirmed_marks_purchased_and_told_undoes_it(client, ids, wl, lego):
+    assign(client, lego, [ids.jordan], [])
+    assert status(client, lego, "confirmed").status_code == 200
+    assert wl.posts()[-1] == (PURCHASE, {"by": "Jordan", "purchased": True})
+    assert (wl.item(11)["purchased"], wl.item(11)["purchased_by"], wl.item(11)["reserved_by"]) == (True, "Jordan", None)
+    sent = len(wl.posts())
+    assert status(client, lego, "given").status_code == 200   # still purchased: nothing to send
+    assert len(wl.posts()) == sent
+    assert status(client, lego, "told").status_code == 200
+    assert wl.posts()[sent:] == [(PURCHASE, {"by": "Jordan", "purchased": False}), (RESERVE, {"by": "Jordan"})]
+    assert (wl.item(11)["purchased"], wl.item(11)["reserved_by"]) == (False, "Jordan")
+    assert board(client, ids)["givers"][0]["gifts"][0]["wish"]["in_sync"] is True
+
+
+def test_reassigning_a_purchased_wish_moves_the_purchase(client, ids, wl, lego):
+    assign(client, lego, [ids.jordan], [])
+    status(client, lego, "confirmed")
+    sent = len(wl.posts())
+    assert assign(client, lego, [ids.casey], [ids.jordan]).get_json()["status"] == "confirmed"
+    assert wl.posts()[sent:] == [(PURCHASE, {"by": "Jordan", "purchased": False}), (PURCHASE, {"by": "Casey", "purchased": True})]
+    sent = len(wl.posts())
+    assert assign(client, lego, [ids.alex], [ids.casey]).get_json()["status"] == "decided"
+    assert wl.posts()[sent:] == [(PURCHASE, {"by": "Casey", "purchased": False}), (RESERVE, {"by": "Us"})]
+
+
+def test_ours_track_status_and_other_fields_never_send(client, ids, wl, lego):
+    assign(client, lego, [ids.alex], [])
+    sent = len(wl.requests)
+    for value in ("decided", "arrived", "wrapped", "given", "idea"):
+        assert status(client, lego, value).status_code == 200, value
+    for body in ({"santa": True}, {"title": "Lego castle", "price": "60", "notes": "Hide it", "store": "Elsewhere"},
+                 {"recipient_ids": [ids.kid1, ids.kid2]}, {"santa": False}):
+        assert client.patch(f"/api/gifts/{lego}", json=body, headers=mut()).status_code == 200, body
+    assert len(wl.requests) == sent
+
+
+def test_patch_keeps_the_wishlist_in_step(client, ids, wl, lego):
+    r = client.patch(f"/api/gifts/{lego}", json={"giver_ids": [ids.casey]}, headers=mut())
+    assert r.status_code == 200
+    assert wl.posts() == [(RESERVE, {"by": "Casey"})]
+    r = client.patch(f"/api/gifts/{lego}", json={"status": "confirmed"}, headers=mut())
+    assert r.status_code == 200 and wl.posts()[-1] == (PURCHASE, {"by": "Casey", "purchased": True})
+    wl.down = True
+    r = client.patch(f"/api/gifts/{lego}", json={"giver_ids": [ids.jordan], "title": "Changed"}, headers=mut())
+    assert r.status_code == 503
+    assert (gift(client, lego)["giver_ids"], gift(client, lego)["title"]) == ([ids.casey], "Lego set")
+
+
+def test_deleting_a_reserved_gift_releases_it(client, ids, wl, lego, unlock):
+    assign(client, lego, [ids.jordan], [])
+    wl.down = True
+    r = client.delete(f"/api/gifts/{lego}", json={}, headers=mut())
+    assert r.status_code == 503 and con_rows("SELECT COUNT(*) FROM gifts") == [(1,)]
+    wl.down = False
+    assert client.delete(f"/api/gifts/{lego}", json={}, headers=mut()).status_code == 200
+    assert wl.posts()[-1] == (RESERVE, {"by": None}) and wl.item(11)["reserved_by"] is None
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    # A purchase stays when its gift is deleted, and an unassigned gift has nothing to release.
+    board(client, ids)
+    a = add(client, ids, 11).get_json()["id"]
+    b = add(client, ids, 12).get_json()["id"]
+    assign(client, a, [ids.jordan], [])
+    status(client, a, "confirmed")
+    sent = len(wl.posts())
+    assert client.delete(f"/api/gifts/{a}", json={}, headers=mut()).status_code == 200
+    assert client.delete(f"/api/gifts/{b}", json={}, headers=mut()).status_code == 200
+    assert len(wl.posts()) == sent and wl.item(11)["purchased"] is True
+
+
+def test_a_shoppers_reservation_is_never_ours_to_change(client, ids, wl, lego):
+    assign(client, lego, [ids.jordan], [])
+    wl.item(11).update(reserved_by="Pat", reserved_by_email="pat@example.com")  # an editor moved it on the wishlist
+    client.post("/api/wishlist/refresh", json={}, headers=mut())
+    assert board(client, ids)["givers"][0]["gifts"][0]["wish"]["in_sync"] is False
+    sent = len(wl.posts())
+    assert assign(client, lego, [], [ids.jordan]).status_code == 200  # unassigning ours: Pat's reservation is left alone
+    assert len(wl.posts()) == sent
+    r = assign(client, lego, [ids.casey], [])
+    assert r.status_code == 409 and wl.item(11)["reserved_by"] == "Pat"
+    wl.item(11).update(reserved_by=None, reserved_by_email=None, purchased=True, purchased_by="Pat",
+                       purchased_by_email="pat@example.com")
+    client.post("/api/wishlist/refresh", json={}, headers=mut())
+    sent = len(wl.posts())
+    assert assign(client, lego, [ids.casey], []).status_code == 409   # bought by a shopper: refused without a request
+    assert len(wl.posts()) == sent
+
+
+def test_v1_never_writes_to_the_wishlist(client, ids, wl, lego):
+    assign(client, lego, [ids.jordan], [])
+    t = mk_token("full", unlocked=True)
+    sent = len(wl.requests)
+    r = client.post(f"/api/v1/gifts/{lego}/status", json={"status": "confirmed"}, headers=bearer(t))
+    assert (r.status_code, r.get_json()) == (409, {"error": "This gift is on the wishlist: change its status in the app."})
+    assert gift(client, lego)["status"] == "told"
+    assert client.post(f"/api/v1/gifts/{lego}/status", json={"status": "told"}, headers=bearer(t)).status_code == 200
+    for scope in ("delivery", "shop"):
+        low = mk_token(scope)
+        assert client.get(f"/api/v1/gifts/{lego}", headers=bearer(low)).status_code == 404
+        assert client.post(f"/api/v1/gifts/{lego}/status", json={"status": "confirmed"}, headers=bearer(low)).status_code in (403, 404)
+    assert len(wl.requests) == sent
+    full = client.get(f"/api/v1/gifts/{lego}", headers=bearer(t)).get_json()
+    assert not {"wish", "wishlist_item_id", "wishlist"} & set(full)
+
+
+def test_with_the_feature_off_a_linked_gift_is_local_only(client, ids, wl, lego, monkeypatch):
+    monkeypatch.setattr(settings, "WISHLIST_URL", "")
+    sent = len(wl.requests)
+    assert assign(client, lego, [ids.jordan], []).status_code == 200
+    assert status(client, lego, "confirmed").status_code == 200
+    assert client.delete(f"/api/gifts/{lego}", json={}, headers=mut()).status_code == 200
+    assert len(wl.requests) == sent
+
+
+
+# ---------------------------------------------------------------- keep last: every request this file made
+FORBIDDEN = ("santa", "status", "price", "location", "seller", "order", "ship", "eta", "arrived", "note", "agent",
+             "token", "giver", "recipient", "gift", "occasion", "budget")
+
+
+def test_zz_every_request_of_this_file_was_allowed():
+    """Review Focus 1 over the whole file (this test runs last, in file order): every request the stub received went
+    to the configured origin on a fixed path with no query, carried the configured token and no other credential,
+    and had a body of `by` and `purchased` only, with no word of the tracker's private fields anywhere in it."""
+    assert len(REQUESTS) >= 100
+    posts = [r for r in REQUESTS if r["method"] == "POST"]
+    assert {(r["path"].rsplit("/", 1)[1], r["body"].get("purchased")) for r in posts} >= \
+        {("reserve", None), ("purchase", True), ("purchase", False)}
+    assert any(r["body"] == {"by": None} for r in posts)
+    for r in REQUESTS:
+        check_request(r)
+        assert r["token"] == TOKEN and r["headers"]["Authorization"] == f"Bearer {TOKEN}"
+        if r["raw"] is not None:
+            assert set(r["body"]) <= ALLOWED_KEYS
+            assert type(r["body"]["by"]) in (str, type(None)) and type(r["body"].get("purchased", False)) is bool
+            keys_text = " ".join(r["body"]).lower()
+            assert not any(word in keys_text for word in FORBIDDEN), r["body"]
+            assert "santa" not in r["raw"].decode().lower()

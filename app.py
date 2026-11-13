@@ -407,14 +407,14 @@ def gifts_update(gift_id):
     data = json_body()
     refuse_locked_write(data)
     refuse_locked_exchange_write(data, gift_id)
-    gifts.update(db(), gift_id, data, actor=g.user["name"])
+    wishlist.update(db(), gift_id, data, actor=g.user["name"])  # gifts.update, keeping a linked wish in step
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
 @app.delete("/api/gifts/<int:gift_id>")
 def gifts_delete(gift_id):
     visible_gift(gift_id)
-    gifts.delete(db(), gift_id)
+    wishlist.delete_gift(db(), gift_id)  # gifts.delete, releasing a linked wish's reservation
     return jsonify(ok=True)
 
 
@@ -425,7 +425,7 @@ def gifts_status(gift_id):
     status = data.get("status")
     if not isinstance(status, str):
         raise ApiError(400, "status must be text.")
-    gifts.set_status(db(), gift_id, status, data, actor=g.user["name"])  # the body may carry order fields
+    wishlist.set_status(db(), gift_id, status, data, g.user["name"])  # gifts.set_status (the body may carry order fields), and a linked wish
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
@@ -497,7 +497,7 @@ def gifts_assign(gift_id):
     """{giver_ids, expected_giver_ids}: 409 when the givers are no longer the ones the caller saw."""
     visible_gift(gift_id)
     giver_ids, expected = boards.parse_assign(json_body())
-    boards.assign(db(), gift_id, giver_ids, expected)
+    wishlist.assign(db(), gift_id, giver_ids, expected)  # boards.assign, and a linked wish reserved or released
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
