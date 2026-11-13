@@ -27,3 +27,23 @@ def text(data: dict, key: str) -> str:
     if not isinstance(value, str):
         raise ApiError(400, f"{key} must be text.")
     return value.strip()
+
+
+def flag(data: dict, key: str, default: bool | None = None) -> bool | None:
+    """data[key] as a bool; `default` when missing or null; 400 when it is anything but true or false."""
+    value = data.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ApiError(400, f"{key} must be true or false.")
+    return value
+
+
+def whole(data: dict, key: str, default: int | None = None) -> int | None:
+    """data[key] as a whole number; `default` when missing or null; 400 for anything else (booleans included)."""
+    value = data.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ApiError(400, f"{key} must be a whole number.")
+    return value

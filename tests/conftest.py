@@ -79,3 +79,40 @@ def con():
     c = db.connect(settings.DB_PATH)
     yield c
     c.close()
+
+
+# ---------------------------------------------------------------- helpers that drive the API
+# Plain functions, imported by the tests that need them (`from conftest import mk_person`).
+def _ok(r, status):
+    assert r.status_code == status, r.get_json()
+    return r.get_json()
+
+
+def mk_person(client, name, **fields):
+    """Create a person through the API; returns the id."""
+    return _ok(client.post("/api/people", json={"name": name, **fields}, headers=mut()), 201)["id"]
+
+
+def mk_occasion(client, name="Christmas 2026", kind="christmas", date="2026-12-25", **fields):
+    return _ok(client.post("/api/occasions", json={"name": name, "kind": kind, "date": date, **fields},
+                           headers=mut()), 201)["id"]
+
+
+def put_plan(client, occasion_id, person_id, plan="individual", budget_cents=None):
+    return _ok(client.put(f"/api/occasions/{occasion_id}/people/{person_id}",
+                          json={"plan": plan, "budget_cents": budget_cents}, headers=mut()), 200)
+
+
+def mk_gift(client, occasion_id, title, to, frm=(), **fields):
+    """Create a gift through the API; `to` and `frm` are lists of person ids. Returns the id."""
+    body = {"occasion_id": occasion_id, "title": title, "recipient_ids": list(to), "giver_ids": list(frm), **fields}
+    return _ok(client.post("/api/gifts", json=body, headers=mut()), 201)["id"]
+
+
+def con_rows(sql, *params):
+    """Rows of a query against the test database, as plain tuples."""
+    c = db.connect(settings.DB_PATH)
+    try:
+        return [tuple(r) for r in c.execute(sql, params)]
+    finally:
+        c.close()

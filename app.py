@@ -8,6 +8,7 @@ from werkzeug.exceptions import HTTPException
 
 import db as database
 import identity
+import people
 import settings
 from common import ApiError, json_body
 
@@ -27,6 +28,7 @@ def init_db():
     con = database.connect(settings.DB_PATH)
     try:
         database.migrate(con)
+        people.ensure_users(con, settings.USERS)
     finally:
         con.close()
 
@@ -98,11 +100,53 @@ def me():
     return jsonify(email=g.user["email"], name=g.user["name"], app_name=settings.APP_NAME)
 
 
+# -- groups
+@app.get("/api/groups")
+def groups_list():
+    return jsonify(people.list_groups(db()))
+
+
 @app.post("/api/groups")
-def create_group():
-    # Stub until plan Task 3 (groups): proves a well-formed mutation passes the guards. Stores nothing.
-    json_body()
-    return jsonify({}), 201
+def groups_create():
+    return jsonify(people.create_group(db(), json_body())), 201
+
+
+@app.patch("/api/groups/<int:group_id>")
+def groups_update(group_id):
+    return jsonify(people.update_group(db(), group_id, json_body()))
+
+
+@app.delete("/api/groups/<int:group_id>")
+def groups_delete(group_id):
+    people.delete_group(db(), group_id)
+    return jsonify(ok=True)
+
+
+# -- people and households
+@app.get("/api/people")
+def people_list():
+    return jsonify(people.list_people(db(), include_inactive=request.args.get("inactive") == "1"))
+
+
+@app.post("/api/people")
+def people_create():
+    return jsonify(people.create_person(db(), json_body())), 201
+
+
+@app.patch("/api/people/<int:person_id>")
+def people_update(person_id):
+    return jsonify(people.update_person(db(), person_id, json_body()))
+
+
+@app.delete("/api/people/<int:person_id>")
+def people_delete(person_id):
+    people.delete_person(db(), person_id)
+    return jsonify(ok=True)
+
+
+@app.get("/api/households")
+def households_list():
+    return jsonify(people.households(db()))
 
 
 init_db()
