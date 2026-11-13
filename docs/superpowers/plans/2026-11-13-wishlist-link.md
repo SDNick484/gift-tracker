@@ -4,7 +4,7 @@
 
 **Goal:** Read a protected person's wishes, with their reserved and purchased state, from the Family Wishlist; show them on that person's board; and write assignments back as reservations (and "confirmed" as purchased), so a relative browsing the wishlist cannot buy something the tracker has already handed to someone. Santa never crosses.
 
-**Architecture:** Schema version 6 adds `wishlist_cache` (one row: the last good feed, its fetch time and the last failure) and `wishlist_aliases` (a wishlist email or free-text name mapped once to a person), and a partial unique index on `gifts.wishlist_item_id` (one gift per wish). All wishlist logic is one new module, `wishlist.py`: the transport (`_open`, the one function that touches the network, stubbed in tests), the defensive feed parser, the cache, matching, the board decoration and the write-back. The three writers that already own a transaction gain one optional, additive hook each (`boards.assign(before_write=)`, `gifts.set_status(before_write=)`, `gifts.create(wishlist_item_id=)`), so the outbound call runs inside the same `BEGIN IMMEDIATE` as the local write. Routes are one separate block of `app.py`, all `family_only` and `@unlock_required`. The board screen gains a wishlist section. No new dependency.
+**Architecture:** Schema version 6 adds `wishlist_cache` (one row: the last good feed, its fetch time and the last failure) and `wishlist_aliases` (a wishlist email or free-text name mapped once to a person), and a partial unique index on `gifts.wishlist_item_id` (one gift per wish). All wishlist logic is one new module, `wishlist.py`: the transport (`_open`, the one function that touches the network, stubbed in tests), the defensive feed parser, the cache, matching, the board decoration and the write-back. The writers that already own a transaction gain one optional, additive parameter each (`boards.assign(after_write=)`, `gifts.set_status(after_write=)`, `gifts.update(after_write=)`, `gifts.create(wishlist_item_id=)`), so the outbound call runs inside the same `BEGIN IMMEDIATE` as the local write. Routes are one separate block of `app.py`, all `family_only` and `@unlock_required`. The board screen gains a wishlist section. No new dependency.
 
 **Tech Stack:** as the core plan (`http.client` from the standard library for the transport).
 
@@ -20,11 +20,10 @@
 - **Cache.** The parsed feed is stored with `fetched_at`. A read refreshes when the feed is over 60 seconds old and the last failure is over 30 seconds old; `POST /api/wishlist/refresh` always tries. A failure keeps the cache and sets `failed_at`; the board shows the cache, its age and `reachable: false`. Nothing is queued.
 - **Off-list.** After a good fetch, a gift linked to a wish that is no longer in the feed is unlinked (`wishlist_item_id = NULL`) and stays as an ordinary gift, but only when the tab of one of its recipients (`people.wishlist_person_id`) is in the feed: a tab removed from `FEED_PEOPLE` does not wipe links. A linked gift whose wish is not in the cache is treated as off-list by every write (no outbound call).
 - **Label.** The outbound `by` is built from the givers only, never from Santa or status: any owner among the givers becomes the owners' household label (their shared `household`, else `Us`); every other giver becomes their household, else their name; distinct parts joined by " & ", cut at 80 characters. So Alex alone, Sam alone, both, with or without Santa, all write the same label.
-- **Write-back order.** The outbound call runs inside the local `BEGIN IMMEDIATE` and before the local write: a wishlist 409 or 404 or an unreachable wishlist raises before anything is written, and the transaction rolls back (nothing changes locally). If anything after a successful outbound call raises (the local write or the commit), the wishlist is put back as the cache said it was (reserve the old label, or release), then the error is raised. The other owner's simultaneous assign waits on the lock and then gets the existing 409 without any request. Holding the write lock across a request (up to 5 s) is accepted for a two-person app.
-  - Assign / reassign / unassign a linked, listed gift: reserve the new label (`by: null` to release) unless the cache already shows exactly that feed reservation. A wish marked purchased on the wishlist cannot be reassigned (409: set it back to told first).
-  - Status of a linked, listed gift: the wish should be purchased when the gift is on the theirs track and `confirmed` or `given`; when that differs from the cache, `purchase {by: label, purchased: true|false}`. Santa and every ours-track status never send anything.
-  - Deleting a linked, listed gift that holds a feed reservation releases it first.
-  - `PATCH /api/gifts/<id>` that would change the givers of a linked, listed gift, or flip its purchased state, is 409 (use the board). So is the same status flip through `/api/v1`.
+- **Write-back order.** Inside the local `BEGIN IMMEDIATE`: the local write (with all its checks), then the outbound call(s) computed from what was just written, then the cache update, then COMMIT. A wishlist 409 or 404 or an unreachable wishlist raises before COMMIT, so the transaction rolls back (nothing changes locally). If anything after an accepted outbound call raises (a second outbound call, the cache write, the commit), every accepted call is taken back newest first (reserve the old label, release, re-purchase), then the error is raised. A call that timed out may have arrived, so its inverse is sent too (harmless if it did not). (Changed while building: the first draft put the outbound call before the local write, which would have had to repeat the track and status rules of `gifts._set_givers` to know what to send.) The other owner's simultaneous assign waits on the lock and then gets the existing 409 without any request. Holding the write lock across a request (up to 5 s) is accepted for a two-person app.
+  - What the wishlist should show is computed from the gift after the local write: purchased by the label when the gift is on the theirs track and `confirmed` or `given`, else reserved by the label (or nothing, with no giver). `_plan` compares that with the cache and sends only the difference: a reserve (`by: null` to release), a purchase, or an un-purchase followed by a reserve (the contract's purchase ends the reservation, so going back to told reserves again). So assign, reassign (a purchased wish moves its purchase to the new label), unassign, status and `PATCH /api/gifts/<id>` all keep it in step through the same hook, and Santa and every other field send nothing because they do not change the label or the purchased state. A reservation or purchase by a signed-in shopper (an email on it) is never ours to change: releasing leaves it, claiming it is 409.
+  - Deleting a linked, listed gift that holds a feed reservation releases it first; a purchase stays.
+  - `/api/v1` never writes to the wishlist: a status there that would flip a listed wish's purchased state is 409 (change it in the app). (Changed while building: the first draft also refused such changes through `PATCH`; the hook made that unnecessary, so the gift page works on linked gifts.)
   - Wishlist 409 → 409 `{"error": "Someone else has this on the wishlist. Reload."}` and the cache is refreshed; 404 → 409 `This wish is no longer on the wishlist. Reload.` and a refresh; anything else → 503 `The wishlist cannot be reached. Nothing was changed.` with `failed_at` set.
 - **Adding a wish.** `POST /api/occasions/<occasion_id>/board/<person_id>/wishes/<item_id>` (body `{}`) creates the linked gift (title, url, store and price from the cached wish; no givers; status idea), sending nothing: an unassigned gift and an open wish agree. Assigning it is the ordinary assign. 404 for a wish not on that person's tab, 409 for a wish already linked or not open in the cache.
 - **Reservations made on the wishlist.** A wish on the person's tab that is reserved or purchased and has no linked gift is listed under the person matched by email (an owner's `users.email`, else an email alias), else by a name alias of the free-text name; unmatched ones are listed once each for the owner to map (`PUT /api/wishlist/aliases {kind, value, person_id}`). Mapping is stored, not re-asked.
@@ -44,8 +43,8 @@
 db.py             + _to_v6, MIGRATIONS[6], SCHEMA_VERSION = 6
 settings.py       + WISHLIST_URL, WISHLIST_TOKEN (one block, validated at import)
 wishlist.py       NEW: transport, parser, cache, labels, matching, board decoration, aliases, write-back
-boards.py         assign(before_write=None)
-gifts.py          create(wishlist_item_id=None), set_status(before_write=None)
+boards.py         assign(after_write=None)
+gifts.py          create(wishlist_item_id=None), set_status(after_write=None), update(after_write=None)
 agent.py          set_status refuses a purchased-state flip of a linked wish
 app.py            board and assign/status/patch/delete go through wishlist when it is on; one block of wishlist routes
 static/js/        board.js (the wishlist section); style.css (+ .wish rules)
@@ -173,9 +172,9 @@ def test_the_privacy_walks_pass_with_the_feature_on(client, world, wl): the lock
 
 ### Task 6: Write-back
 
-**Files:** Modify `boards.py` (`assign(before_write=)`), `gifts.py` (`set_status(before_write=)`), `agent.py` (`set_status`), `app.py` (assign, status, patch, delete routes); Test: `tests/test_wishlist.py`.
+**Files:** Modify `boards.py` (`assign(after_write=)`), `gifts.py` (`set_status(after_write=)`, `update(after_write=)`), `agent.py` (`set_status`), `app.py` (assign, status, patch, delete routes); Test: `tests/test_wishlist.py`.
 
-**Interfaces:** `wishlist.assign(con, gift_id, giver_ids, expected)`, `wishlist.set_status(con, gift_id, status, order, actor)`, `wishlist.delete_gift(con, gift_id)`, `wishlist.refuse_unsynced(con, gift_id, data)` (PATCH and `/api/v1`).
+**Interfaces:** `wishlist.assign(con, gift_id, giver_ids, expected)`, `wishlist.set_status(con, gift_id, status, order, actor)`, `wishlist.update(con, gift_id, data, actor)`, `wishlist.delete_gift(con, gift_id)`, `wishlist.refuse_agent_flip(con, gift_id, status)` (`/api/v1`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -186,15 +185,17 @@ def test_unassigning_releases(client, ids, wl, unlock): {"by": None}
 def test_a_409_from_the_wishlist_is_409_changes_nothing_and_refreshes(client, ids, wl, unlock): givers, status, told_at unchanged; a GET /api/feed followed
 def test_unreachable_is_503_and_changes_nothing(client, ids, wl, unlock): and failed_at is set; the board shows reachable False
 def test_a_removed_wish_is_409_and_becomes_off_list(client, ids, wl, unlock): wishlist 404 → 409; after the refresh the gift is unlinked and assign works locally with no request
-def test_a_local_failure_after_a_reserve_releases_it(client, ids, wl, unlock, monkeypatch): gifts._set_givers raises → 500 is not reached (the test client raises) / the second request is {"by": None}; the givers are unchanged
-def test_a_local_failure_after_a_relabel_restores_the_old_label(...): the undo is {"by": "Jordan"}
+def test_a_local_failure_after_a_reserve_releases_it(client, ids, wl, unlock, monkeypatch): the cache write after the reserve raises → 500; the second request is {"by": None}; the givers are unchanged
+def test_a_local_failure_after_a_relabel_restores_the_old_label(...): the COMMIT fails → the undo is {"by": "Jordan"}
 def test_two_owners_assigning_at_once_make_one_request(client, ids, wl, unlock): threads as in test_boards; one 200, one 409; exactly one reserve recorded
 def test_confirmed_marks_purchased_and_told_undoes_it(client, ids, wl, unlock): {"by": "Jordan", "purchased": True} then False; given after confirmed sends nothing
-def test_a_purchased_wish_cannot_be_reassigned(client, ids, wl, unlock): 409, nothing sent
+def test_reassigning_a_purchased_wish_moves_the_purchase(client, ids, wl, unlock): un-purchase then purchase under the new label; to us: un-purchase then reserve "Us"
+def test_a_failure_on_the_second_write_takes_back_the_first(...): the reserve after an un-purchase is refused, so the purchase is sent again
+def test_a_shoppers_reservation_is_never_ours_to_change(...)
 def test_ours_track_status_and_santa_never_send(client, ids, wl, unlock)
 def test_deleting_a_reserved_gift_releases_it(client, ids, wl, unlock): and when the release fails the gift stays (503)
-def test_patch_cannot_change_givers_or_the_purchased_state_of_a_linked_wish(client, ids, wl, unlock): 409; unchanged giver set and other fields still work
-def test_v1_cannot_flip_the_purchased_state_of_a_linked_wish(client, ids, wl, unlock): full unlocked token, confirmed → 409, nothing sent
+def test_patch_keeps_the_wishlist_in_step(client, ids, wl, unlock): giver change reserves, status confirmed purchases, unreachable is 503 and changes nothing
+def test_v1_never_writes_to_the_wishlist(client, ids, wl, unlock): full unlocked token, confirmed → 409, nothing sent; lower scopes 404
 def test_off_list_and_feature_off_writes_are_local_only(client, ids, wl, unlock, monkeypatch)
 def test_zz_every_request_of_this_file_was_allowed(): every captured body's keys ⊆ {"by", "purchased"}, values str|None and bool, no query, the only Authorization is the configured token; at least one reserve and one purchase were captured
 ```

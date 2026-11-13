@@ -40,6 +40,19 @@ Three lists, linked from the home screen with their counts: Not here yet (ordere
 
 Some relatives are only bought for through an exchange with a limit and a date (Secret Santa, Favorite Things, a staff exchange). An exchange belongs to an occasion: a name, a budget and a date, and which of us (or which of the children) drew whom. Add the gift for a draw on the Exchanges screen (linked from Settings, and listed on the home screen); a gift over the limit is flagged, never refused. Only this household's side is kept, never the full pairing. While the app is locked, a draw that involves a protected person, and its gift, is not shown anywhere. Copying an occasion brings each exchange's name and budget, with no draws. A school instance has exchanges too, with no lock.
 
+## The wishlist link
+
+A child's board can show their wishes from the [Family Wishlist](https://github.com/SDNick484/family-wishlist), with what is already reserved or bought there, and write the tracker's assignments back as reservations, so a relative browsing the wishlist cannot buy something already handed to someone. It is off until `WISHLIST_URL` is set, and only in a family instance. The contract between the two apps is `docs/wishlist-feed.md`.
+
+- **Link a board.** On a child's board pick their wishlist tab once (it is remembered on the person).
+- **Wishes.** "On the wishlist" lists the open wishes. Adding one puts it on the board as an unassigned gift (title, link, store and price from the wish); choosing a giver there, or later with Assign, reserves it on the wishlist under the giver's household label. Unassigning releases it; marking a gift from someone else confirmed (or given) marks it bought there, and setting it back to told undoes that. Deleting a gift releases its reservation.
+- **Santa never crosses.** A gift from us is written under our household label (`Us` unless the owners share another household name), with or without Santa, from one of us or both. Nothing else the tracker knows is ever sent: no Santa, status, price, store, order details, hiding place or note.
+- **Reserved on the wishlist.** Wishes someone reserved or bought on the wishlist itself are listed under the person they match (by their wishlist email, or a name mapped once under "Who is this?").
+- **When the wishlist is down** the board shows what it last said and how old that is; Assign is off for wishes and answers 503 if tried. Nothing is queued: try again later. A refusal (someone else got there first) is shown and the board reloads.
+- **A wish deleted on the wishlist** (or archived after the occasion) leaves its gift in the tracker as an ordinary gift.
+
+Everything about the wishlist needs the PIN, like the boards. Agent tokens never see it and never write to it.
+
 ## Agents
 
 Agents use their own API, `/api/v1`, with a token made in Settings > Agent tokens (it needs the PIN, and is shown once). A token has one scope: `delivery` reads what is decided or ordered and records order details and arrivals, `shop` also reads ideas and budgets and marks gifts ordered, `full` does everything the agent API offers, adding gifts too. Every token is locked like a browser before the PIN: no protected gift, no Santa, no board, ever, unless it is a `full` token made to see them. Every write a token makes is noted on the gift with its name. An MCP server over the same API (`mcp_server.py`, and `mcp_http.py` as the `tracker-mcp` service) is how an owner's agent connects. Setup, the Cloudflare rules for `/api/v1` and the tools: `docs/mcp-setup.md`.
@@ -57,7 +70,7 @@ sh installer/build.sh                            # writes dist/setup-tracker.sh
 sh setup-tracker.sh
 ```
 
-`deploy/deploy.env` holds household defaults (`ALLOWED_EMAILS`, `USERS`, `CF_TEAM_DOMAIN`, `CF_AUD`, `APP_NAME`); they are used on the first install only. The installer is safe to re-run: it installs `py3-flask py3-gunicorn py3-jwt py3-cryptography` and `sqlite` with `apk`, replaces `/opt/tracker`, and keeps `/var/lib/tracker` and `/etc/conf.d/tracker`. It adds settings that are missing from the config and never overwrites existing ones, and it never writes `DEV_EMAIL`. Edit settings with `vim /etc/conf.d/tracker`, then:
+`deploy/deploy.env` holds household defaults (`ALLOWED_EMAILS`, `USERS`, `CF_TEAM_DOMAIN`, `CF_AUD`, `APP_NAME`, `WISHLIST_URL`); they are used on the first install only. The installer is safe to re-run: it installs `py3-flask py3-gunicorn py3-jwt py3-cryptography` and `sqlite` with `apk`, replaces `/opt/tracker`, and keeps `/var/lib/tracker` and `/etc/conf.d/tracker`. It adds settings that are missing from the config and never overwrites existing ones, and it never writes `DEV_EMAIL`. Edit settings with `vim /etc/conf.d/tracker`, then:
 
 ```sh
 rc-service tracker restart
@@ -65,6 +78,17 @@ tail -n 40 /var/log/tracker.log
 ```
 
 Gunicorn runs as the unprivileged `tracker` user under OpenRC (`rc-service tracker status`). `sh setup-tracker.sh --uninstall` removes the app and service and keeps data, config and backups.
+
+### The wishlist link
+
+Turn it on in a family instance after the wishlist side (its `FEED_TOKEN` and `FEED_PEOPLE` settings) is deployed. Choose a long random token and set it in both apps: `FEED_TOKEN` on the wishlist, and in `/etc/conf.d/tracker`:
+
+```sh
+WISHLIST_URL="http://192.0.2.10:8090"   # the wishlist on the LAN, never its public hostname
+WISHLIST_TOKEN="<the same value as FEED_TOKEN>"
+```
+
+then `rc-service tracker restart`. `WISHLIST_URL` may be baked from `deploy/deploy.env`; the token never is. The wishlist refuses feed requests that come through Cloudflare, so the tracker reaches it directly on the LAN (outbound only: the tracker still listens on loopback). Over `http://` the token crosses the LAN in clear text; keep both containers on one host or a trusted segment, or use `https://`. A bad `WISHLIST_URL` (not http or https, a user name, a query) or a missing token stops the app at start-up with a message in `/var/log/tracker.log`. Leave both unset in a school instance; the link is off there regardless.
 
 The installer also sets up the MCP service, `tracker-mcp`, with its own user, pip venv and config (`/etc/conf.d/tracker-mcp`). It stays off until that config has an agent token and its Cloudflare settings; see `docs/mcp-setup.md`.
 
