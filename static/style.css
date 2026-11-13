@@ -191,6 +191,11 @@ input[type="color"] { width: 44px; height: 44px; padding: 3px; border: 1px solid
 .assign { min-height: 36px; padding: 5px 8px; width: auto; max-width: 100%; font-weight: 600; font-size: .88rem; }
 .menu-note { grid-column: 1 / -1; }
 
+/* the wishlist on a board */
+.wishlist h3 { margin: 4px 0 -2px; font-size: .95rem; }
+.wishlist .row .name a { color: inherit; }
+.badge.wish { color: var(--pine); border-color: currentColor; }
+
 /* the PIN pad */
 .overlay {
   position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px;
