@@ -38,7 +38,7 @@ Three lists, linked from the home screen with their counts: Not here yet (ordere
 
 ## Gift exchanges
 
-Some relatives are only bought for through an exchange with a limit and a date (Secret Santa, Favorite Things, a staff exchange). An exchange belongs to an occasion: a name, a budget and a date, and which of us (or which of the children) drew whom. Add the gift for a draw on the Exchanges screen (linked from Settings, and listed on the home screen); a gift over the limit is flagged, never refused. Only this household's side is kept, never the full pairing. While the app is locked, a draw that involves a protected person, and its gift, is not shown anywhere. Copying an occasion brings each exchange's name and budget, with no draws. A school instance has exchanges too, with no lock.
+Some relatives are only bought for through an exchange with a limit and a date (Secret Santa, Favorite Things, a staff exchange). An exchange belongs to an occasion: a name, a budget and a date, and which of us (or which of the children) drew whom. Add the gift for a draw on the Exchanges screen (linked from Settings, and listed on the home screen); a gift over the limit is flagged, never refused. Only this household's side is kept, never the full pairing. While the app is locked, a draw that involves a protected person, and its gift, is not shown anywhere. A gift for a draw is from the person who drew (a child's draw is a gift from the child and both of us, so it is tracked, ordered, wrapped and counted in spending like our other gifts, but never from Santa). Copying an occasion brings each exchange's name and budget, with no draws. A school instance has exchanges too, with no lock.
 
 ## The wishlist link
 

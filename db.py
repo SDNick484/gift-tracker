@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -163,6 +163,27 @@ def _to_v6(con):
 
 
 MIGRATIONS[6] = _to_v6
+
+
+# Version 7 (owners as co-givers): data only. A gift for an exchange draw whose givers are all protected people (a child
+# drew the name) becomes a gift from the drawer and every owner, on the ours track: told -> decided, confirmed ->
+# arrived, given stays. Once it has an owner among its givers it no longer matches, so running it again does nothing.
+def _to_v7(con):
+    owners = [r[0] for r in con.execute("SELECT person_id FROM users")]
+    if not owners:
+        return  # no owner to add: leave the gifts as they are
+    ids = [r[0] for r in con.execute(
+        "SELECT g.id FROM gifts g WHERE g.exchange_id IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM gift_givers x WHERE x.gift_id = g.id) "
+        "AND NOT EXISTS (SELECT 1 FROM gift_givers x JOIN people p ON p.id = x.person_id "
+        "WHERE x.gift_id = g.id AND p.protected = 0)")]
+    for gid in ids:
+        con.executemany("INSERT OR IGNORE INTO gift_givers (gift_id, person_id) VALUES (?, ?)", [(gid, o) for o in owners])
+        con.execute("UPDATE gifts SET status = CASE status WHEN 'told' THEN 'decided' WHEN 'confirmed' THEN 'arrived' "
+                    "ELSE status END WHERE id = ?", (gid,))
+
+
+MIGRATIONS[7] = _to_v7
 
 
 def migrate(con):

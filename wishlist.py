@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 import boards
 import common
 import db
+import exchanges
 import gifts
 import occasions
 import people
@@ -383,7 +384,7 @@ def _wish_json(it: dict) -> dict:
 def _expected(con, gift_id: int) -> tuple[bool, str | None]:
     """What the wishlist should show for a linked gift: (purchased, by)."""
     row = gifts.get(con, gift_id)
-    givers = gifts._ids(con, "gift_givers", gift_id)
+    givers = exchanges.drawer_only(con, gift_id, gifts._ids(con, "gift_givers", gift_id))
     trk = gifts.track(set(givers), people.user_person_ids(con))
     return trk == "theirs" and row["status"] in PURCHASED, label(con, givers)
 
@@ -652,7 +653,8 @@ def refuse_agent_flip(con, gift_id: int, status) -> None:
     if not isinstance(status, str) or _listed(con, gift_id) is None:
         return
     row = gifts.get(con, gift_id)
-    if gifts.track(set(gifts._ids(con, "gift_givers", gift_id)), people.user_person_ids(con)) != "theirs":
+    if gifts.track(set(exchanges.drawer_only(con, gift_id, gifts._ids(con, "gift_givers", gift_id))),
+                   people.user_person_ids(con)) != "theirs":
         return
     if (row["status"] in PURCHASED) != (status in PURCHASED):
         raise ApiError(409, "This gift is on the wishlist: change its status in the app.")

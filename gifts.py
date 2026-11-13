@@ -141,7 +141,9 @@ def _fields(data: dict, partial: bool) -> dict:
     return out
 
 
-def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int]) -> None:
+def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int], exchange_id=None) -> None:
+    if santa and exchange_id is not None:
+        raise ApiError(400, "A gift for an exchange is from the drawer, never from Santa.")
     if santa and not (track(giver_ids, user_ids) == "ours" and giver_ids & user_ids):
         raise ApiError(400, "Santa is only for a gift from an owner.")
 
@@ -155,6 +157,8 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) 
     if not recipients:
         raise ApiError(400, "A gift needs at least one recipient.")
     givers = _person_ids(con, data, "giver_ids") or []
+    exchange_id = exchanges.exchange_id_of(con, data) if "exchange_id" in data else None
+    givers = exchanges.expand_givers(con, givers, exchange_id)  # a protected drawer's gift is also from the owners
     occasion_id = data.get("occasion_id")
     if isinstance(occasion_id, bool) or not isinstance(occasion_id, int) or not con.execute(
             "SELECT 1 FROM occasions WHERE id = ?", (occasion_id,)).fetchone():
@@ -167,8 +171,7 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) 
     elif status not in _statuses(trk):
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
     santa = bool(flag(data, "santa", False))
-    _check_santa(santa, set(givers), user_ids)
-    exchange_id = exchanges.exchange_id_of(con, data) if "exchange_id" in data else None
+    _check_santa(santa, set(givers), user_ids, exchange_id)
     now = common.now()
     with db.transaction(con):
         gid = con.execute(
@@ -192,7 +195,7 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
     set_givers describes; Santa is checked against the result; a status goes through the same rules as
     set_status, ordered included. All of it applies or none of it. `after_write()` runs inside the transaction after
     the local write (wishlist.update); if it raises, nothing is written."""
-    _row(con, gift_id)
+    old = _row(con, gift_id)
     f = _fields(data, partial=True)
     order = orders.parse(con, data)
     status = data.get("status")
@@ -205,6 +208,12 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
     santa = flag(data, "santa")
     if "exchange_id" in data:
         f["exchange_id"] = exchanges.exchange_id_of(con, data)
+    link = f["exchange_id"] if "exchange_id" in data else old["exchange_id"]
+    if link is not None and "exchange_id" in data and (old["santa"] if santa is None else santa):
+        raise ApiError(400, "A gift for an exchange is from the drawer, never from Santa.")  # linking a Santa gift
+    if link is not None and (givers is not None or "exchange_id" in data):
+        # A protected drawer's gift is also from the owners; this runs on a new giver list and on a new link.
+        givers = exchanges.expand_givers(con, _ids(con, "gift_givers", gift_id) if givers is None else givers, link)
     with db.transaction(con):
         if givers is not None:
             _set_givers(con, gift_id, givers)
@@ -216,7 +225,7 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
             con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)",
                             [(gift_id, p) for p in recipients if p not in have])
         if santa is not None:
-            _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con))
+            _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con), link)
             f["santa"] = int(santa)
         f["updated_at"] = common.now()
         con.execute(f"UPDATE gifts SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), gift_id))

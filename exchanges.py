@@ -2,8 +2,10 @@
 household drew whom, and the gift for each draw. Route-free: every function takes a sqlite3.Connection.
 
 Only this household's side is kept. A drawer is an owner or a protected person; the recipient is anyone else. A
-gift for a draw is an ordinary gift whose `exchange_id` is set, whose only giver is the drawer and whose only
-recipient is the person drawn (check_gift).
+gift for a draw is an ordinary gift whose `exchange_id` is set and whose only recipient is the person drawn. An
+owner's draw has the owner as its only giver. A protected drawer does not buy the gift: its givers are the drawer
+plus every owner (expand_givers, check_gift), so it is tracked and counted like any gift the owners buy. The drawer
+of a gift is its protected giver (DRAWER_GIVER); with no protected giver, its one giver.
 
 Privacy: a draw is protected when its drawer or its recipient is protected, judged from people.protected at read
 time. While locked a protected draw does not exist: list_for_occasion leaves it out (and so does the home summary,
@@ -19,6 +21,10 @@ from common import ApiError, text, whole
 
 MAX_NAME = 100
 DRAW_PROTECTED = "(dp.protected = 1 OR rp.protected = 1)"  # over d (draw), dp (drawer) and rp (recipient)
+# Over g (gift), gg (one of its givers) and gp (that giver's person): gg is the gift's drawer, so an owner who is only
+# a co-giver of a protected drawer's gift is not taken for the drawer of that owner's own draw.
+DRAWER_GIVER = ("(gp.protected = 1 OR NOT EXISTS (SELECT 1 FROM gift_givers dx JOIN people dxp ON dxp.id = dx.person_id "
+                "WHERE dx.gift_id = g.id AND dxp.protected = 1))")
 
 
 def _name(data: dict) -> str:
@@ -74,8 +80,10 @@ def list_for_occasion(con, occasion_id: int, *, unlocked: bool) -> list[dict]:
     by_draw = {}
     for r in con.execute(
             "SELECT g.id, g.title, g.status, g.price_cents, g.exchange_id, gg.person_id AS giver, gr.person_id AS recipient "
-            "FROM gifts g JOIN gift_givers gg ON gg.gift_id = g.id JOIN gift_recipients gr ON gr.gift_id = g.id "
-            f"WHERE g.exchange_id IN (SELECT id FROM exchanges WHERE occasion_id = ?) AND (? OR NOT {gifts.PROTECTED_SQL}) "
+            "FROM gifts g JOIN gift_givers gg ON gg.gift_id = g.id JOIN people gp ON gp.id = gg.person_id "
+            "JOIN gift_recipients gr ON gr.gift_id = g.id "
+            f"WHERE g.exchange_id IN (SELECT id FROM exchanges WHERE occasion_id = ?) AND {DRAWER_GIVER} "
+            f"AND (? OR NOT {gifts.PROTECTED_SQL}) "
             "ORDER BY g.id", (occasion_id, int(unlocked))):
         by_draw.setdefault((r["exchange_id"], r["giver"], r["recipient"]), r)
     out = []
@@ -138,7 +146,9 @@ def _draw(con, exchange_id: int, drawer_id: int):
 
 def _has_gift(con, exchange_id: int, drawer_id: int, recipient_id: int) -> bool:
     return con.execute("SELECT 1 FROM gifts g JOIN gift_givers gg ON gg.gift_id = g.id AND gg.person_id = ? "
-                       "JOIN gift_recipients gr ON gr.gift_id = g.id AND gr.person_id = ? WHERE g.exchange_id = ?",
+                       "JOIN people gp ON gp.id = gg.person_id "
+                       "JOIN gift_recipients gr ON gr.gift_id = g.id AND gr.person_id = ? "
+                       f"WHERE g.exchange_id = ? AND {DRAWER_GIVER}",
                        (drawer_id, recipient_id, exchange_id)).fetchone() is not None
 
 
@@ -201,11 +211,38 @@ def exchange_id_of(con, data: dict):
     return value
 
 
+def _owners_if_hidden_drawer(con, giver_ids) -> set[int]:
+    """The owners, when one of these givers is a protected person (family mode); else the empty set."""
+    if common.is_school() or not set(giver_ids) & people.protected_ids(con):
+        return set()
+    return people.user_person_ids(con)
+
+
+def expand_givers(con, giver_ids: list[int], exchange_id) -> list[int]:
+    """The givers to store for a gift linked to `exchange_id`: when one is a protected drawer, every owner is added
+    (a child draws the name; a parent buys the gift). Anything else comes back unchanged."""
+    if exchange_id is None:
+        return list(giver_ids)
+    return [*giver_ids, *sorted(_owners_if_hidden_drawer(con, giver_ids) - set(giver_ids))]
+
+
+def drawer_only(con, gift_id: int, giver_ids: list[int]) -> list[int]:
+    """The givers the wishlist link sees. For a protected drawer's exchange gift that is the drawer alone, so the link
+    never writes the owners' household as `by` and never counts the gift as bought by us: what the wishlist shows for a
+    gift linked to both a wish and an exchange is what it showed before the owners became co-givers."""
+    row = con.execute("SELECT exchange_id FROM gifts WHERE id = ?", (gift_id,)).fetchone()
+    hidden = set(giver_ids) & people.protected_ids(con)
+    if row is None or row["exchange_id"] is None or common.is_school() or not hidden:
+        return list(giver_ids)
+    return [i for i in giver_ids if i in hidden]
+
+
 def check_gift(con, gift_id: int) -> None:
     """The gift's link to an exchange, if it has one, must be a draw: the exchange is in the gift's own occasion,
-    the gift has exactly one giver and one recipient, and that pair is one of the exchange's draws (400), and no
-    other gift is linked to the same draw (409). Run inside the writer's transaction, after the people are stored,
-    so an error rolls the whole write back."""
+    the gift has exactly one recipient, and its drawer and that recipient are one of the exchange's draws (400), and
+    no other gift is linked to the same draw (409). The drawer is the gift's one giver, or, when a giver is protected,
+    that giver with every owner as co-giver and nobody else. Run inside the writer's transaction, after the people
+    are stored, so an error rolls the whole write back."""
     gift = con.execute("SELECT occasion_id, exchange_id FROM gifts WHERE id = ?", (gift_id,)).fetchone()
     if gift["exchange_id"] is None:
         return
@@ -216,9 +253,19 @@ def check_gift(con, gift_id: int) -> None:
         raise ApiError(400, "That exchange belongs to another occasion.")
     givers = [r[0] for r in con.execute("SELECT person_id FROM gift_givers WHERE gift_id = ?", (gift_id,))]
     recipients = [r[0] for r in con.execute("SELECT person_id FROM gift_recipients WHERE gift_id = ?", (gift_id,))]
-    draw = _draw(con, gift["exchange_id"], givers[0]) if len(givers) == 1 else None
-    if len(givers) != 1 or len(recipients) != 1 or draw is None or draw["recipient_id"] != recipients[0]:
-        raise ApiError(400, "A gift for an exchange has the drawer as its one giver and the person drawn as its one recipient.")
+    hidden = set() if common.is_school() else set(givers) & people.protected_ids(con)
+    if hidden:
+        drawer_id = next(iter(hidden)) if len(hidden) == 1 else None
+        if drawer_id is not None and set(givers) != {drawer_id} | people.user_person_ids(con):
+            drawer_id = None
+    else:
+        drawer_id = givers[0] if len(givers) == 1 else None
+    draw = _draw(con, gift["exchange_id"], drawer_id) if drawer_id is not None else None
+    if len(recipients) != 1 or draw is None or draw["recipient_id"] != recipients[0]:
+        raise ApiError(400, "A gift for an exchange has the drawer as its giver (with both owners for a protected "
+                            "drawer) and the person drawn as its one recipient.")
     if con.execute("SELECT 1 FROM gifts g JOIN gift_givers gg ON gg.gift_id = g.id AND gg.person_id = ? "
-                   "WHERE g.exchange_id = ? AND g.id != ?", (givers[0], gift["exchange_id"], gift_id)).fetchone():
+                   "JOIN people gp ON gp.id = gg.person_id "
+                   f"WHERE g.exchange_id = ? AND g.id != ? AND {DRAWER_GIVER}",
+                   (drawer_id, gift["exchange_id"], gift_id)).fetchone():
         raise ApiError(409, "This draw already has a gift.")
