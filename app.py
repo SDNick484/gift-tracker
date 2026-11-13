@@ -8,6 +8,7 @@ from werkzeug.exceptions import HTTPException
 
 import db as database
 import identity
+import occasions
 import people
 import settings
 from common import ApiError, json_body
@@ -147,6 +148,35 @@ def people_delete(person_id):
 @app.get("/api/households")
 def households_list():
     return jsonify(people.households(db()))
+
+
+# -- occasions and the per-person plan
+@app.get("/api/occasions")
+def occasions_list():
+    return jsonify(occasions.list_all(db()))
+
+
+@app.post("/api/occasions")
+def occasions_create():
+    return jsonify(id=occasions.create_from(db(), json_body())), 201
+
+
+@app.patch("/api/occasions/<int:occasion_id>")
+def occasions_update(occasion_id):
+    occasions.update(db(), occasion_id, json_body())
+    return jsonify(ok=True)
+
+
+@app.put("/api/occasions/<int:occasion_id>/people/<int:person_id>")
+def occasion_plan_set(occasion_id, person_id):
+    occasions.set_plan_from(db(), occasion_id, person_id, json_body())
+    return jsonify(ok=True)
+
+
+@app.delete("/api/occasions/<int:occasion_id>/people/<int:person_id>")
+def occasion_plan_remove(occasion_id, person_id):
+    occasions.remove_plan(db(), occasion_id, person_id)
+    return jsonify(ok=True)
 
 
 init_db()

@@ -116,3 +116,13 @@ def con_rows(sql, *params):
         return [tuple(r) for r in c.execute(sql, params)]
     finally:
         c.close()
+
+
+@pytest.fixture
+def freeze_today(monkeypatch):
+    """freeze_today("2026-11-12") makes common.today() return that date."""
+    import common
+
+    def freeze(day):
+        monkeypatch.setattr(common, "today", lambda: day)
+    return freeze

@@ -1,4 +1,6 @@
 """Request-body helpers and the error type that routes and modules raise. No routes here."""
+from datetime import date
+
 from flask import request
 
 
@@ -47,3 +49,8 @@ def whole(data: dict, key: str, default: int | None = None) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ApiError(400, f"{key} must be a whole number.")
     return value
+
+
+def today() -> str:
+    """Today as YYYY-MM-DD. Every module asks here, so tests can freeze it (the `freeze_today` fixture)."""
+    return date.today().isoformat()

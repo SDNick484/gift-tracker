@@ -35,7 +35,7 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
 app.py            Flask object, before/after hooks, every route
 settings.py       environment config, read once at import
 db.py             SCHEMA, SCHEMA_VERSION, MIGRATIONS, connect(), transaction(), migrate()
-common.py         json_body, text, flag, whole, parse_cents, ApiError
+common.py         json_body, text, flag, whole, parse_cents, today, ApiError
 identity.py       Cloudflare JWT verification, resolve_user()
 lock.py           PIN hashing, unlock cookie, is_unlocked()
 people.py         groups, people, households, users
