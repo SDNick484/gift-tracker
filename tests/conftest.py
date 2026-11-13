@@ -181,3 +181,22 @@ def clock(monkeypatch):
     state.advance = lambda seconds: setattr(state, "t", state.t + seconds)
     monkeypatch.setattr(common, "now", lambda: state.t)
     return state
+
+
+# ---------------------------------------------------------------- agent tokens (/api/v1)
+def mk_token(scope="delivery", name=None, unlocked=False):
+    """A token made directly through tokens.create, past the web app's unlock. Returns the token string."""
+    import tokens
+    c = db.connect(settings.DB_PATH)
+    try:
+        body = {"name": name or f"{scope.title()} agent", "scope": scope}
+        if unlocked:
+            body["unlocked"] = True
+        return tokens.create(c, body)["token"]
+    finally:
+        c.close()
+
+
+def bearer(token, **extra):
+    """Headers of an /api/v1 request: the bearer token and nothing else (no Cloudflare, no CSRF header)."""
+    return {"Authorization": f"Bearer {token}", **extra}

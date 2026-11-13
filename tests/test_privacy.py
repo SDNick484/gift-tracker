@@ -46,6 +46,7 @@ def args(w):
         "group_id": [w.group],
         "address_id": [*(r[0] for r in con_rows("SELECT id FROM addresses ORDER BY id")), 999999],
         "location_id": [999999],
+        "token_id": [1, 999999],
     }
 
 

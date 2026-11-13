@@ -10,6 +10,7 @@ from flask import Flask, abort, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 import addresses
+import agent
 import boards
 import budgets
 import db as database
@@ -22,6 +23,7 @@ import occasions
 import people
 import school
 import settings
+import tokens
 from common import ApiError, is_school, json_body, locked
 
 app = Flask(__name__)
@@ -29,6 +31,7 @@ app.json.sort_keys = False
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024  # bodies are small JSON objects
 
 OPEN_PATHS = {"/healthz"}           # the only paths that answer without an identity
+AGENT_API = "/api/v1"               # bearer tokens only: see agent_guard()
 SAFE_METHODS = {"GET", "HEAD"}      # every other method is a mutation and needs the CSRF checks
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
        "manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -68,6 +71,8 @@ def guard():
     a JSON body, and an Origin naming this host."""
     if request.path in OPEN_PATHS:
         return
+    if request.path == AGENT_API or request.path.startswith(AGENT_API + "/"):
+        return agent_guard()
     user = identity.resolve_user(request.headers, request.remote_addr or "")
     if user is None:
         raise ApiError(403, "Forbidden")
@@ -80,6 +85,21 @@ def guard():
     # netloc only: behind the tunnel the app sees http while the browser's Origin says https.
     if urlparse(origin).netloc.lower() != request.host.lower():
         raise ApiError(403, "Cross-origin request blocked.")
+
+
+def agent_guard():
+    """/api/v1 admits a live bearer token and nothing else: no Cloudflare identity, no cookie, no CSRF header (a
+    browser never sends a bearer header on its own). Presenting nothing at all is the 403 every anonymous request
+    gets; presenting anything that is not a live token (a Cloudflare identity, a bad or revoked token) is 401."""
+    token = tokens.authenticate(db(), request.headers.get("Authorization"))
+    if token is None:
+        if "Authorization" not in request.headers and not any(h in request.headers for h in identity.CF_HEADERS):
+            raise ApiError(403, "Forbidden")
+        raise ApiError(401, "Unauthorized")
+    g.token = token
+    g.unlocked = agent.sees_protected(token)  # set before any view runs: the unlock cookie is never read here
+    if request.method not in SAFE_METHODS and not request.is_json:
+        raise ApiError(400, "Bad request.")
 
 
 def unlocked() -> bool:
@@ -144,7 +164,10 @@ def security_headers(resp):
 
 @app.errorhandler(ApiError)
 def api_error(e):
-    return jsonify(error=e.message, **e.extra), e.status
+    resp = jsonify(error=e.message, **e.extra)
+    if e.status == 401:
+        resp.headers["WWW-Authenticate"] = 'Bearer realm="api"'
+    return resp, e.status
 
 
 @app.errorhandler(HTTPException)
@@ -525,6 +548,33 @@ def lists_where(occasion_id):
 @app.get("/api/occasions/<int:occasion_id>/lists/counts")
 def lists_counts(occasion_id):
     return jsonify(lists.counts(db(), occasion_id, unlocked=unlocked()))
+
+
+# -- agent tokens, managed by a signed-in owner. All three need the unlock: a full token is as strong as the PIN, and
+# the list names which agents exist. A token cannot reach these (it has no Cloudflare identity).
+@app.get("/api/tokens")
+@unlock_required
+def tokens_list():
+    return jsonify(tokens.list_all(db()))
+
+
+@app.post("/api/tokens")
+@unlock_required
+def tokens_create():
+    return jsonify(tokens.create(db(), json_body())), 201
+
+
+@app.delete("/api/tokens/<int:token_id>")
+@unlock_required
+def tokens_revoke(token_id):
+    return jsonify(tokens.revoke(db(), token_id))
+
+
+# -- the agent API: /api/v1, bearer tokens only (agent_guard). g.token is the caller; g.unlocked is the token's view.
+# Path arguments are named `gift` and `occasion`; the logic and the scope rules are in agent.py.
+@app.get("/api/v1/me")
+def v1_me():
+    return jsonify(agent.me(g.token))
 
 
 init_db()
