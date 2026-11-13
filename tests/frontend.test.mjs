@@ -8,6 +8,7 @@ import { backTarget, forChoices, fromChoices, render as renderIdeaScreen } from 
 import { findEntry, giftLine, groupByOccasion, renderPage, totalsText } from "../static/js/person.js";
 import { buildPatch, canSanta, pickList, renderPage as renderGiftPage, renderSteps, stepClass } from "../static/js/gift.js";
 import { assignBody, assignChoices, countGifts, evennessLine, renderBoard, splitLine } from "../static/js/board.js";
+import { groupPayload, occasionPayload, personPayload, pinPayload, renderOccasionEdit, renderPersonForm, renderSettings, visibleHouseholds } from "../static/js/settings.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
@@ -361,4 +362,65 @@ test("board: no Santa checkbox without the flag, and typed text is escaped", () 
   const html = renderBoard(b, "<i>X</i>", [{ value: "9", label: `<script>` }]);
   assert.ok(!html.includes("data-santa"));
   assert.ok(!/<img|<b>|<i>|<script/.test(html), html);
+});
+
+// ---------------------------------------------------------------- settings.js
+test("settings: person payload sends the color only once it was touched, and never a blank name", () => {
+  const v = { name: " Pat ", group: "", household: " Pat & Lee ", protected: false, active: undefined, color: "#9aa29c", colorTouched: false };
+  assert.deepEqual(personPayload(v), { name: "Pat", group_id: null, household: "Pat & Lee", protected: false });
+  assert.deepEqual(personPayload({ ...v, group: "4", active: false, colorTouched: true, color: "#112233" }),
+    { name: "Pat", group_id: 4, household: "Pat & Lee", protected: false, active: false, color: "#112233" });
+  assert.throws(() => personPayload({ ...v, name: "  " }), /name/);
+});
+
+test("settings: group, occasion and PIN payloads", () => {
+  assert.deepEqual(groupPayload({ name: " Side A " }), { name: "Side A" });
+  assert.deepEqual(groupPayload({ name: "B", sort: "3" }), { name: "B", sort_order: 3 });
+  assert.deepEqual(groupPayload({ name: "B", sort: "" }), { name: "B" });
+  assert.throws(() => groupPayload({ name: "B", sort: "-1" }), /whole number/);
+  assert.deepEqual(occasionPayload({ name: "Christmas", kind: "christmas", date: "2026-12-25", copyFrom: "3" }),
+    { name: "Christmas", date: "2026-12-25", kind: "christmas", copy_from: 3 });
+  assert.deepEqual(occasionPayload({ name: "Christmas", kind: "christmas", date: "2026-12-25", copyFrom: "" }),
+    { name: "Christmas", date: "2026-12-25", kind: "christmas" });
+  assert.deepEqual(occasionPayload({ name: "X", date: "2026-12-25", archived: true }), { name: "X", date: "2026-12-25", archived: true });
+  assert.throws(() => occasionPayload({ name: "X", date: "" }), /date/);
+  assert.deepEqual(pinPayload({ pin: "4821", again: "4821", current: "" }, false), { pin: "4821" });
+  assert.deepEqual(pinPayload({ pin: "4821", again: "4821", current: "1234" }, true), { pin: "4821", current: "1234" });
+  assert.throws(() => pinPayload({ pin: "48", again: "48", current: "" }, false), /4 to 8/);
+  assert.throws(() => pinPayload({ pin: "4821", again: "4822", current: "" }, false), /differ/);
+  assert.throws(() => pinPayload({ pin: "4821", again: "4821", current: "" }, true), /current/);
+});
+
+test("settings: a locked page lists no protected household member", () => {
+  const people = [{ id: 1, name: "Alex" }, { id: 2, name: "Riley", protected: true }, { id: 3, name: "Pat" }];
+  const hs = [{ label: "Us", person_ids: [1, 2] }, { label: "Riley", person_ids: [2] }, { label: "Pat", person_ids: [3] }];
+  assert.deepEqual(visibleHouseholds(hs, people, false), [{ label: "Us", names: ["Alex"] }, { label: "Pat", names: ["Pat"] }]);
+  assert.equal(visibleHouseholds(hs, people, true).length, 3);
+});
+
+const settingsData = (over = {}) => ({
+  me: { email: "alex@example.com", has_pin: false }, groups: [{ id: 1, name: "Side A", sort_order: 0 }],
+  people: [{ id: 3, name: "Pat", group_id: 1, household: "Pat & Lee", color: "#1f4d3a", protected: false, active: true, is_user: false }],
+  hiddenCount: 0, households: [{ label: "Pat & Lee", names: ["Pat"] }], occasions: [{ id: 1, name: "Xmas", kind: "christmas", date: "2026-12-25", archived: false, current: true }],
+  copyDefault: 1, ...over,
+});
+
+test("settings: page shows the hidden count, not the names, while locked; the PIN form follows has_pin", () => {
+  const html = renderSettings(settingsData({ hiddenCount: 2 }));
+  assert.ok(html.includes("2 protected people are hidden while locked") && html.includes('data-act="unlock"'));
+  assert.ok(!renderSettings(settingsData()).includes("hidden while locked"));
+  assert.ok(html.includes("Set PIN") && !html.includes('name="current"'));
+  const withPin = renderSettings(settingsData({ me: { email: "alex@example.com", has_pin: true } }));
+  assert.ok(withPin.includes("Change PIN") && withPin.includes('name="current"'));
+  assert.ok(html.includes('<option value="1" selected>Xmas</option>'), "a new occasion copies the current one by default");
+});
+
+test("settings: forms escape typed text, and an owner cannot be deleted", () => {
+  const evil = { id: 3, name: `"><script>1</script>`, group_id: 1, household: `<b>`, color: null, protected: true, active: false, is_user: false };
+  const html = renderSettings(settingsData({ people: [evil], groups: [{ id: 1, name: `<i>G</i>`, sort_order: 0 }] })) + renderPersonForm(evil, [{ id: 1, name: "<u>" }]) + renderOccasionEdit({ id: 1, name: `"><svg>`, date: "2026-12-25", archived: false });
+  assert.ok(!/<script|<b>|<i>|<u>|<svg/.test(html), html);
+  const owner = { ...evil, name: "Alex", is_user: true };
+  assert.ok(!renderPersonForm(owner, []).includes("delete-person"));
+  assert.ok(renderPersonForm({ ...owner, is_user: false }, []).includes("delete-person"));
+  assert.ok(renderPersonForm(null, []).includes("Add person") && !renderPersonForm(null, []).includes('name="active"'));
 });

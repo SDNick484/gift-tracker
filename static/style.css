@@ -223,3 +223,6 @@ input[type="color"] { width: 44px; height: 44px; padding: 3px; border: 1px solid
 button.row { width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit; }
 
 .card.colored { border-left: 6px solid var(--c, var(--line)); }
+.slot { grid-column: 1 / -1; min-width: 0; }
+.slot:empty { display: none; }
+.slot > form { padding-top: 8px; }
