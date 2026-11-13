@@ -4,7 +4,7 @@
 // draws the same route again (after an unlock, say).
 import { ApiError, events, send } from "./api.js";
 import { applyColors, esc, loadAll, parseHash, renderIcon, state } from "./core.js";
-import { idleExpired, openPad } from "./lock.js";
+import { idleExpired, openPad, padIsOpen } from "./lock.js";
 
 const SCREENS = {
   "": () => import("./home.js"),
@@ -99,6 +99,7 @@ async function lockNow() {
 events.addEventListener("locked", async () => {
   if (state.me) state.me.unlocked = false;
   updateLockButton();
+  if (padIsOpen()) return; // the event that opened it will redraw once, after the unlock
   if (await openPad()) route();
 });
 

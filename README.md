@@ -4,7 +4,7 @@ A private, self-hosted planner for household gift giving: who each gift is for, 
 
 Flask + SQLite with a plain HTML/JS frontend, run by gunicorn on an Alpine container behind a Cloudflare Tunnel. Only the two email addresses in its own Cloudflare Access application (and in `ALLOWED_EMAILS`) get in; there is no LAN access.
 
-Status: the installer and backup exist (see Deployment); the app skeleton, schema and identity guard exist; the features are being built from `docs/superpowers/plans/`. The design is in `docs/superpowers/specs/`. Work is queued as issues titled `Prompt:`.
+Status: the installer and backup exist (see Deployment); the app skeleton, schema, identity guard, API and phone-first frontend exist; the remaining features are being built from `docs/superpowers/plans/`. The design is in `docs/superpowers/specs/`. Work is queued as issues titled `Prompt:`.
 
 ## Development
 
@@ -16,10 +16,14 @@ DEV_EMAIL=alex@example.com ALLOWED_EMAILS=alex@example.com,sam@example.com \
 
 `DEV_EMAIL` admits requests from loopback that carry no Cloudflare headers, as that user. It is for development only and is never set on the server. Settings are documented at the top of `settings.py`.
 
+The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/settings`).
+
 Tests and lint:
 
 ```sh
 python -m pytest -q && ruff check
+for f in static/js/*.js; do node --check "$f"; done
+node --test tests/frontend.test.mjs
 ```
 
 ```sh
