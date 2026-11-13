@@ -125,6 +125,8 @@ add_setting "$CONF" CF_AUD "${CF_AUD:-}" "AUD tag of the tracker's own Access ap
 add_setting "$CONF" APP_NAME "${APP_NAME:-Ledger}" "Page title and home-screen name. Keep it neutral."
 add_setting "$CONF" LOCK_IDLE_SECONDS "${LOCK_IDLE_SECONDS:-300}" "Idle seconds before the protected boards lock"
 add_setting "$CONF" MODE "${MODE:-family}" "family (the default) or school: school makes this the staff-gift tracker, with no lock, no Santa and no boards"
+add_setting "$CONF" WISHLIST_URL "${WISHLIST_URL:-}" "Family Wishlist base URL on the LAN, e.g. http://192.0.2.10:8090. Empty = the wishlist link is off. Family instances only."
+add_setting "$CONF" WISHLIST_TOKEN "" "The wishlist's FEED_TOKEN (the same value in both apps). Required when WISHLIST_URL is set; never baked into the installer."
 # Holds the household's emails, so root only: OpenRC runs as root and gives the service what it needs.
 chmod 600 "$CONF"; chown root:root "$CONF"
 APP_ADDED=${ADDED:-}; ADDED=
@@ -165,7 +167,7 @@ start_pre() {
   : ${TRACKER_PORT:=@DEFAULT_PORT@}
   command_args="--preload --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:${TRACKER_PORT} --chdir /opt/@NAME@ --error-logfile /var/log/@NAME@.log app:app"
   export HOME=/var/lib/@NAME@ DATA_DIR=/var/lib/@NAME@
-  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE
+  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE WISHLIST_URL WISHLIST_TOKEN
   checkpath -f -o @NAME@:@NAME@ -m 0640 /var/log/@NAME@.log
 }
 EOF

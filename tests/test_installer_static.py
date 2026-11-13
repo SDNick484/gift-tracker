@@ -150,8 +150,9 @@ DEFAULT_VALUES = {
     "BACKUP_JOB": "/etc/periodic/daily/tracker-backup", "DEFAULT_PORT": "8767", "LABEL": "",
 }
 
-# The service script of a default install: what the installer wrote before instance names existed, plus MODE in
-# the exported names (a new setting). Any other difference is a change to the default install.
+# The service script of a default install: what the installer wrote before instance names existed, plus MODE,
+# WISHLIST_URL and WISHLIST_TOKEN in the exported names (new settings). Any other difference is a change to the
+# default install.
 DEFAULT_INIT = """#!/sbin/openrc-run
 name="tracker"
 description="Gift Tracker (Flask + gunicorn, loopback only)"
@@ -170,7 +171,7 @@ start_pre() {
   : ${TRACKER_PORT:=8767}
   command_args="--preload --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:${TRACKER_PORT} --chdir /opt/tracker --error-logfile /var/log/tracker.log app:app"
   export HOME=/var/lib/tracker DATA_DIR=/var/lib/tracker
-  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE
+  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE WISHLIST_URL WISHLIST_TOKEN
   checkpath -f -o tracker:tracker -m 0640 /var/log/tracker.log
 }
 """  # noqa: E501  (the golden text has the installer's long command_args line)
@@ -393,4 +394,15 @@ def test_the_mcp_household_values_are_baked_but_never_a_token(tmp_path):
     assert ': "${MCP_PUBLIC_HOSTS:=mcp.example.com}"' in out and ': "${CF_ACCESS_AUD:=aud-mcp}"' in out
     assert ': "${MCP_ALLOWED_EMAILS:=alex@example.com}"' in out
     assert "gt_never_baked" not in out
+    subprocess.run(["sh", "-n", os.path.join(repo, "dist", "setup-tracker.sh")], check=True)
+
+
+def test_the_wishlist_url_is_baked_but_never_its_token(tmp_path):
+    repo = mini_repo(tmp_path, deploy_env="WISHLIST_URL=http://192.0.2.10:8090\nWISHLIST_TOKEN=wl_never_baked\n")
+    build(repo)
+    out = open(os.path.join(repo, "dist", "setup-tracker.sh")).read()
+    assert ': "${WISHLIST_URL:=http://192.0.2.10:8090}"' in out
+    assert "wl_never_baked" not in out
+    head = open(HEAD).read()
+    assert 'add_setting "$CONF" WISHLIST_TOKEN "" ' in head  # the installer writes it empty: the owner fills it in
     subprocess.run(["sh", "-n", os.path.join(repo, "dist", "setup-tracker.sh")], check=True)

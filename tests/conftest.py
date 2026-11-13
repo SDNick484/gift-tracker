@@ -18,7 +18,7 @@ os.environ.update(
     CF_AUD="aud-test",
     DEV_EMAIL="",  # never inherit a developer's shell setting: it would admit loopback requests
 )
-for name in ("TRACKER_PORT", "APP_NAME", "LOCK_IDLE_SECONDS"):
+for name in ("TRACKER_PORT", "APP_NAME", "LOCK_IDLE_SECONDS", "WISHLIST_URL", "WISHLIST_TOKEN"):
     os.environ.pop(name, None)  # test the defaults
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
