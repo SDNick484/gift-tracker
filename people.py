@@ -29,6 +29,11 @@ def user_person_ids(con) -> set[int]:
     return {r["person_id"] for r in con.execute("SELECT person_id FROM users")}
 
 
+def protected_ids(con) -> set[int]:
+    """Every protected person, active or not: their gifts are behind the idle lock."""
+    return {r["id"] for r in con.execute("SELECT id FROM people WHERE protected = 1")}
+
+
 # ---------------------------------------------------------------- groups
 def _group(row) -> dict:
     return {"id": row["id"], "name": row["name"], "sort_order": row["sort_order"]}

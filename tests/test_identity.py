@@ -48,7 +48,8 @@ def test_valid_jwt_for_allowed_email(client):
 
 def test_me_returns_display_name_and_app_name(client):
     assert client.get("/api/me", headers=auth("sam@example.com")).get_json() == \
-        {"email": "sam@example.com", "name": "Sam", "app_name": "Ledger"}
+        {"email": "sam@example.com", "name": "Sam", "app_name": "Ledger", "has_pin": False, "unlocked": False,
+         "lock_idle_seconds": 300}
 
 
 def test_email_is_compared_lowercased(client):

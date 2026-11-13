@@ -50,8 +50,8 @@ def test_gift_with_no_giver_is_ours_and_records_the_creator(client, ids):
     assert body["created_by"] == "alex@example.com"
 
 
-def test_gift_from_someone_else_starts_told(client, ids, freeze_today):
-    freeze_today("2026-11-20")
+def test_gift_from_someone_else_starts_told(client, ids, freeze_today, unlock):
+    unlock(); freeze_today("2026-11-20")      # kid1 is protected: adding a gift for them needs the unlock
     g = mk_gift(client, ids.o, "eReader", to=[ids.kid1], frm=[ids.casey])
     body = client.get(f"/api/gifts/{g}", headers=auth()).get_json()
     assert (body["track"], body["status"], body["told_at"]) == ("theirs", "told", "2026-11-20")
@@ -207,7 +207,8 @@ def test_history_is_newest_occasion_first(client, ids):
     assert client.get("/api/people/999/history", headers=auth()).status_code == 404
 
 
-def test_giver_only_person_cannot_be_deleted(client, ids):
+def test_giver_only_person_cannot_be_deleted(client, ids, unlock):
+    unlock()                                  # deleting a person needs the unlock (tests/test_privacy.py)
     mk_gift(client, ids.o, "Book", to=[ids.jordan], frm=[ids.casey])
     r = client.delete(f"/api/people/{ids.casey}", headers=mut())
     assert r.status_code == 409

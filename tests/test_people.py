@@ -73,14 +73,16 @@ def test_update_person_is_partial(client):
     assert client.patch("/api/people/9999", json={"name": "X"}, headers=mut()).status_code == 404
 
 
-def test_delete_person_without_gifts_and_user_person_is_refused(client):
+def test_delete_person_without_gifts_and_user_person_is_refused(client, unlock):
+    unlock()                                  # deleting a person needs the unlock (tests/test_privacy.py)
     pid = mk_person(client, "Casey")
     assert client.delete(f"/api/people/{pid}", headers=mut()).status_code == 200
     alex = next(p["id"] for p in client.get("/api/people", headers=auth()).get_json() if p["name"] == "Alex")
     assert client.delete(f"/api/people/{alex}", headers=mut()).status_code == 409
 
 
-def test_delete_person_with_gifts_is_409_and_deactivate_keeps_history(client):
+def test_delete_person_with_gifts_is_409_and_deactivate_keeps_history(client, unlock):
+    unlock()                                  # deleting a person needs the unlock (tests/test_privacy.py)
     pid = mk_person(client, "Jordan"); oid = mk_occasion(client); mk_gift(client, oid, "Book", to=[pid])
     r = client.delete(f"/api/people/{pid}", headers=mut())
     assert r.status_code == 409 and r.get_json()["error"] == "This person has gifts. Deactivate them instead."

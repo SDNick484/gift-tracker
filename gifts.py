@@ -1,10 +1,13 @@
-"""Gifts: one row per gift however many people give or receive it, two status tracks, and the Santa rule.
-Route-free: every function takes a sqlite3.Connection and raises common.ApiError on bad input.
+"""Gifts: one row per gift however many people give or receive it, two status tracks, the Santa rule, and
+visibility under the idle lock. Route-free: every function takes a sqlite3.Connection and raises common.ApiError
+on bad input.
+
+Visibility: a gift with any protected recipient is protected. While locked it is hidden as a whole: reads that
+list gifts take a required `unlocked` and filter on PROTECTED_SQL, and app.py checks visible() before any read or
+write of one gift. create/update/set_status/set_givers do not look at the lock; app.py refuses locked writes.
 
 A gift's track follows its givers. It is "ours" when no giver is set or an owner (a user) is among them, and
 "theirs" when only other people give it. Money is integer cents (common.parse_cents)."""
-import time
-
 import common
 import db
 import occasions
@@ -13,6 +16,11 @@ from common import ApiError, flag, parse_cents, text
 
 OURS = ("idea", "decided", "ordered", "arrived", "wrapped", "given")
 THEIRS = ("told", "confirmed", "given")
+
+# True for a gift (aliased `g` in the enclosing query) with any protected recipient. Every query that can show a
+# gift while locked filters on this, so a gift shared with a protected person is hidden as a whole.
+PROTECTED_SQL = ("EXISTS (SELECT 1 FROM gift_recipients pr JOIN people pp ON pp.id = pr.person_id "
+                 "WHERE pr.gift_id = g.id AND pp.protected = 1)")
 
 
 def track(giver_ids: set[int], user_ids: set[int]) -> str:
@@ -36,7 +44,20 @@ def _ids(con, table: str, gift_id: int) -> list[int]:
 
 
 def get(con, gift_id: int):
+    """The gift row, or 404. Does not look at the lock: routes check visible() first."""
     return _row(con, gift_id)
+
+
+def is_protected(con, gift_id: int) -> bool:
+    """Whether any recipient is a protected person (active or not)."""
+    return con.execute("SELECT 1 FROM gift_recipients r JOIN people p ON p.id = r.person_id "
+                       "WHERE r.gift_id = ? AND p.protected = 1 LIMIT 1", (gift_id,)).fetchone() is not None
+
+
+def visible(con, gift_id: int, *, unlocked: bool) -> bool:
+    """Whether this request may see or change the gift. A gift that does not exist counts as visible, so the
+    caller's own lookup answers 404 exactly as it would for a protected gift while locked."""
+    return unlocked or not is_protected(con, gift_id)
 
 
 def to_json(con, row, *, unlocked: bool) -> dict:
@@ -51,21 +72,25 @@ def to_json(con, row, *, unlocked: bool) -> dict:
     return out
 
 
-def list_for_person(con, occasion_id: int, person_id: int) -> list:
+def list_for_person(con, occasion_id: int, person_id: int, *, unlocked: bool) -> list:
+    """The person's gifts in one occasion. While locked, gifts with any protected recipient are left out."""
     occasions.get(con, occasion_id)
     people.get_person(con, person_id)
     return con.execute(
         "SELECT g.* FROM gifts g JOIN gift_recipients r ON r.gift_id = g.id "
-        "WHERE g.occasion_id = ? AND r.person_id = ? ORDER BY g.id", (occasion_id, person_id)).fetchall()
+        f"WHERE g.occasion_id = ? AND r.person_id = ? AND (? OR NOT {PROTECTED_SQL}) ORDER BY g.id",
+        (occasion_id, person_id, int(unlocked))).fetchall()
 
 
-def history(con, person_id: int) -> list:
-    """Every gift the person receives, newest occasion first. Works for inactive people."""
+def history(con, person_id: int, *, unlocked: bool) -> list:
+    """Every gift the person receives, newest occasion first. Works for inactive people. While locked, gifts with
+    any protected recipient are left out."""
     people.get_person(con, person_id)
     return con.execute(
         "SELECT g.*, o.name AS occasion_name, o.date AS occasion_date FROM gifts g "
         "JOIN gift_recipients r ON r.gift_id = g.id JOIN occasions o ON o.id = g.occasion_id "
-        "WHERE r.person_id = ? ORDER BY o.date DESC, g.id", (person_id,)).fetchall()
+        f"WHERE r.person_id = ? AND (? OR NOT {PROTECTED_SQL}) ORDER BY o.date DESC, g.id",
+        (person_id, int(unlocked))).fetchall()
 
 
 # ---------------------------------------------------------------- validation
@@ -131,7 +156,7 @@ def create(con, user: dict, data: dict) -> int:
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
     santa = bool(flag(data, "santa", False))
     _check_santa(santa, set(givers), user_ids)
-    now = int(time.time())
+    now = common.now()
     with db.transaction(con):
         gid = con.execute(
             "INSERT INTO gifts (occasion_id, title, status, santa, url, store, price_cents, notes, told_at, "
@@ -162,7 +187,7 @@ def update(con, gift_id: int, data: dict) -> None:
         if santa is not None:
             _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con))
             f["santa"] = int(santa)
-        f["updated_at"] = int(time.time())
+        f["updated_at"] = common.now()
         con.execute(f"UPDATE gifts SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), gift_id))
 
 
@@ -172,7 +197,7 @@ def set_status(con, gift_id: int, status: str) -> None:
     trk = track(set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con))
     if status not in _statuses(trk):
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
-    con.execute("UPDATE gifts SET status = ?, updated_at = ? WHERE id = ?", (status, int(time.time()), row["id"]))
+    con.execute("UPDATE gifts SET status = ?, updated_at = ? WHERE id = ?", (status, common.now(), row["id"]))
 
 
 def set_givers(con, gift_id: int, giver_ids: list[int]) -> None:
@@ -200,7 +225,7 @@ def _set_givers(con, gift_id: int, giver_ids: list[int]) -> None:
     if santa and not (after == "ours" and set(giver_ids) & user_ids):
         santa = 0  # Santa needs a giver who is an owner
     con.execute("UPDATE gifts SET status = ?, santa = ?, told_at = ?, updated_at = ? WHERE id = ?",
-                (status, santa, told_at, int(time.time()), gift_id))
+                (status, santa, told_at, common.now(), gift_id))
 
 
 def delete(con, gift_id: int) -> None:

@@ -12,6 +12,14 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
 - No personal data in the repo: generic names (Alex, Sam, Jordan, Riley, Casey), `example.com` emails, RFC 5737 addresses. Household values live in git-ignored `deploy/deploy.env`. `tests/test_hygiene.py` enforces the emails, plus any strings in the git-ignored `tests/hygiene_denylist.txt`.
 - Identity only from a verified `Cf-Access-Jwt-Assertion` whose email is in `ALLOWED_EMAILS`. No LAN role, ever. The one exception is development: `DEV_EMAIL` set, a loopback remote address, and none of `identity.CF_HEADERS` present. The installer never writes `DEV_EMAIL`.
 - Every mutation needs header `X-Tracker: 1`, a JSON body, and a same-origin `Origin`.
+- Privacy under the idle lock: a gift with any protected recipient is protected. While a request is locked
+  (`app.unlocked()` is false) a protected gift does not exist as far as any response is concerned: `GET`, `PATCH`,
+  `DELETE` and `/status` on it answer the same 404 as a missing gift; it is absent from every list, history, total,
+  count and headline, including those of an unprotected co-recipient; a write that would give a gift a protected
+  recipient, set Santa, unprotect a person or delete a person is 423 `{"error": "Locked", "locked": true}`. No locked
+  response contains `santa`. Every query that can return gifts takes a required `unlocked` (or `include_protected`)
+  and filters on `gifts.PROTECTED_SQL`; every route that takes one gift checks `gifts.visible()` first. A user
+  with no PIN is always locked. `tests/test_privacy.py` walks `app.url_map` and enforces this for every `/api/` route.
 - Read bodies with `json_body()` and strings with `text(data, key)`; bad shapes return 400. Never store non-finite numbers. Money is integer cents.
 - Everything user-typed goes through `esc()` before `innerHTML`. CSP allows no inline scripts and images only from this origin.
 - No gift title or person name in any `<title>`, the manifest, or a log line. Manifest name and page title are the `APP_NAME` setting, default `Ledger`.
@@ -26,7 +34,9 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
 - A new top-level Python module needs no installer edit: `installer/build.sh` ships every top-level `*.py` by glob, and `tests/test_installer_static.py` checks the built payload.
 - A new setting goes in `settings.py`, `.env.example` and the installer's settings list.
 - A schema change bumps `db.SCHEMA_VERSION` and adds a step to `db.MIGRATIONS` (which `migrate()` runs).
-- A new `/api/` GET route must pass `tests/test_privacy.py` (once that exists).
+- A new `/api/` route must pass `tests/test_privacy.py`, which walks `app.url_map`: give a new path argument name
+  a value in its `args()`. A route that shows or changes gifts filters on `gifts.PROTECTED_SQL` or checks
+  `gifts.visible()`, and a board-like route takes `@unlock_required`.
 - A new route of any kind stays behind the identity guard: `tests/test_identity.py` walks `app.url_map` and expects 403 from the LAN everywhere but `/healthz`.
 
 ## File structure
@@ -35,12 +45,12 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
 app.py            Flask object, before/after hooks, every route
 settings.py       environment config, read once at import
 db.py             SCHEMA, SCHEMA_VERSION, MIGRATIONS, connect(), transaction(), migrate()
-common.py         json_body, text, flag, whole, parse_cents, today, ApiError
+common.py         json_body, text, flag, whole, parse_cents, today, now, ApiError, locked
 identity.py       Cloudflare JWT verification, resolve_user()
 lock.py           PIN hashing, unlock cookie, is_unlocked()
 people.py         groups, people, households, seeded users (ensure_users runs at start-up)
 occasions.py      occasions, per-person plan, carry-forward (copy_from), current()
-gifts.py          gift CRUD, tracks (ours/theirs), status, Santa rule, history; visibility arrives with lock.py
+gifts.py          gift CRUD, tracks (ours/theirs), status, Santa rule, history, visibility (PROTECTED_SQL)
 budgets.py        spent/planned totals, occasion summary
 boards.py         a protected person's board, assign, list text
 static/           index.html, style.css, manifest.json, icon.svg
@@ -59,12 +69,18 @@ Not every file exists yet; the plan says which task creates each.
 - `db.connect()` opens connections in autocommit mode (`isolation_level=None`) with foreign keys on and WAL. A single statement commits by itself; wrap anything that must be atomic in `with db.transaction(con):` (`BEGIN IMMEDIATE`).
 - `app.db()` is the per-request connection in `flask.g`. `app.init_db()` runs `migrate()` at import, so every start migrates.
 - `identity.resolve_user(headers, remote_addr)` returns `{"email", "name"}` or `None`. The `before_request` guard in `app.py` turns `None` into 403 `{"error": "Forbidden"}` on every path except `/healthz`, then applies the mutation guard to every `/api/` request that is not GET or HEAD.
-- Raise `common.ApiError(status, message)` from routes and modules; it becomes `{"error": message}`.
+- Raise `common.ApiError(status, message)` from routes and modules; it becomes `{"error": message}` (extra keyword
+  arguments become extra keys). `common.locked()` is the 423 the UI turns into the PIN pad.
+- The idle lock (`lock.py`): `app.unlocked()` reads the `gt_unlock` cookie once per request; `slide_unlock`
+  re-issues it on every unlocked response and clears it otherwise. `lock.load_secret()` runs in `init_db()`.
+- "Now" is `common.now()` (seconds) and "today" is `common.today()`; tests move them with `clock` and `freeze_today`.
 
 ## Tests
 
 - `tests/conftest.py` sets the environment before importing `app`, and gives every test a fresh database (`client`, `con`).
 - Cloudflare is simulated: `identity._jwk_client` is stubbed with a test RSA key. `auth(email)` returns Cloudflare headers with a signed JWT (keyword arguments `aud`, `iss`, `exp`, `key` forge bad ones); `mut(email)` adds `X-Tracker: 1`, a same-origin `Origin` and a JSON content type.
+- Every test client starts locked. `unlock()` sets a PIN if needed and unlocks that client; `mk_protected_gift(ids, ...)`
+  inserts through `gifts.create`, past the lock. `ids` gives protected `kid1` to `kid3`.
 - The Flask test client's default remote address is `127.0.0.1`; `conftest.py` clears `DEV_EMAIL` so loopback is not admitted by accident. Use `environ_base={"REMOTE_ADDR": "192.0.2.50"}` for a LAN request.
 
 ## Verification gate

@@ -1,5 +1,6 @@
 """Request-body helpers and the error type that routes and modules raise. No routes here."""
 import re
+import time
 from datetime import date
 
 from flask import request
@@ -8,10 +9,16 @@ from flask import request
 class ApiError(Exception):
     """Raised anywhere while handling a request; app.py turns it into {"error": message} with this status."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, **extra):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.extra = extra  # more keys for the JSON body, e.g. locked=True
+
+
+def locked() -> ApiError:
+    """The idle lock is closed: 423 {"error": "Locked", "locked": true}. The UI shows the PIN pad on it."""
+    return ApiError(423, "Locked", locked=True)
 
 
 def json_body() -> dict:
@@ -50,6 +57,11 @@ def whole(data: dict, key: str, default: int | None = None) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ApiError(400, f"{key} must be a whole number.")
     return value
+
+
+def now() -> int:
+    """Seconds since the epoch. Every module asks here, so tests can move time (the `clock` fixture)."""
+    return int(time.time())
 
 
 def today() -> str:
