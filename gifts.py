@@ -14,6 +14,11 @@ from common import ApiError, flag, parse_cents, text
 OURS = ("idea", "decided", "ordered", "arrived", "wrapped", "given")
 THEIRS = ("told", "confirmed", "given")
 
+# True for a gift (aliased `g` in the enclosing query) with any protected recipient. Every query that can show a
+# gift while locked filters on this, so a gift shared with a protected person is hidden as a whole.
+PROTECTED_SQL = ("EXISTS (SELECT 1 FROM gift_recipients pr JOIN people pp ON pp.id = pr.person_id "
+                 "WHERE pr.gift_id = g.id AND pp.protected = 1)")
+
 
 def track(giver_ids: set[int], user_ids: set[int]) -> str:
     return "ours" if not giver_ids or giver_ids & user_ids else "theirs"

@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+import budgets
 import db as database
 import gifts
 import identity
@@ -234,6 +235,12 @@ def person_history(person_id):
     return jsonify(person=people.get_person(db(), person_id),
                    gifts=[{**gift_json(r), "occasion": {"id": r["occasion_id"], "name": r["occasion_name"],
                                                          "date": r["occasion_date"]}} for r in rows])
+
+
+# -- budgets
+@app.get("/api/occasions/<int:occasion_id>/summary")
+def occasion_summary(occasion_id):
+    return jsonify(budgets.summary(db(), occasion_id, unlocked=unlocked()))
 
 
 init_db()
