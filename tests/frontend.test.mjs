@@ -983,3 +983,79 @@ test("places screen: each button sends one request and redraws; school mode asks
   await renderPlacesScreen(s.ctx);
   assert.deepEqual(s.calls, ["GET /api/addresses"]);
 });
+
+// ---------------------------------------------------------------- agent tokens and the notes they leave on a gift
+import { day, renderCreated, renderTokenRows, renderTokens, tokenLine, tokenPayload, render as renderTokensScreen } from "../static/js/tokens.js";
+import { agentNote, renderAgentLog } from "../static/js/gift.js";
+
+const TOKENS = [
+  { id: 2, name: "Owner", scope: "full", unlocked: true, created_at: 1800000000, last_used_at: null, revoked_at: null },
+  { id: 1, name: "Shipping", scope: "delivery", unlocked: false, created_at: 1800000000, last_used_at: 1800086400, revoked_at: 1800172800 },
+];
+
+test("tokens: the payload trims, needs a name, and asks to see protected gifts only for full outside school mode", () => {
+  assert.deepEqual(tokenPayload({ name: "  Shipping ", scope: "delivery", unlocked: true }), { name: "Shipping", scope: "delivery" });
+  assert.deepEqual(tokenPayload({ name: "Owner", scope: "full", unlocked: true }), { name: "Owner", scope: "full", unlocked: true });
+  assert.deepEqual(tokenPayload({ name: "Owner", scope: "full", unlocked: false }), { name: "Owner", scope: "full" });
+  assert.deepEqual(tokenPayload({ name: "Owner", scope: "full", unlocked: true }, true), { name: "Owner", scope: "full" });
+  assert.throws(() => tokenPayload({ name: "  ", scope: "shop" }), /needs a name/);
+});
+
+test("tokens: the list escapes names, marks revoked tokens and offers revoke only for live ones", () => {
+  assert.equal(day(1800000000), "2027-01-15");
+  assert.equal(day(null), "");
+  assert.equal(tokenLine(TOKENS[0]), "made 2027-01-15 · never used");
+  assert.equal(tokenLine(TOKENS[1]), "made 2027-01-15 · last used 2027-01-16 · revoked 2027-01-17");
+  const [owner, shipping] = renderTokenRows(TOKENS).split("</li>");
+  assert.ok(owner.includes("sees protected") && owner.includes('data-act="revoke" data-id="2"') && !owner.includes(" dim"));
+  assert.ok(shipping.includes("revoked</span>") && !shipping.includes('data-act="revoke"') && shipping.includes("row dim"));
+  const evil = renderTokenRows([{ ...TOKENS[0], name: EVIL, scope: EVIL }]);
+  assert.ok(!evil.includes("<img"));
+  assert.ok(renderTokenRows([]).includes("No tokens yet."));
+});
+
+test("tokens: a new token is shown once, escaped, with the warning; school mode has no sees-protected box", () => {
+  const made = renderCreated({ name: EVIL, token: "gt_abc<def" });
+  assert.ok(made.includes("It will not be shown again.") && made.includes("gt_abc&lt;def") && !made.includes("<img"));
+  assert.equal(renderCreated(null), "");
+  assert.ok(renderTokens(TOKENS, false).includes('name="unlocked"'));
+  assert.ok(!renderTokens(TOKENS, true).includes('name="unlocked"'));
+  assert.ok(!renderTokens(TOKENS, false).includes("gt_"), "a listed token never shows the token itself");
+});
+
+test("tokens screen: making a token posts the form and draws the token once; revoke asks first", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push(`${init.method} ${url}${init.body && init.body !== "{}" ? ` ${init.body}` : ""}`);
+    const data = init.method === "POST" ? { id: 3, name: "Buyer", scope: "shop", token: "gt_secretvalue" } : init.method === "DELETE" ? TOKENS[0] : TOKENS;
+    return { ok: true, status: init.method === "POST" ? 201 : 200, json: async () => data };
+  };
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }), body: { append() {} } };
+  Object.assign(state, { me: { email: "a@example.com", unlocked: true } });
+  let redraws = 0;
+  const view = { innerHTML: "", handlers: {}, addEventListener(t, f) { this.handlers[t] = f; } };
+  await renderTokensScreen({ view, alive: () => true, rerender() { redraws += 1; } });
+  assert.deepEqual(calls, ["GET /api/tokens"]);
+  const form = { dataset: { form: "token-add" }, querySelector: () => ({ textContent: "" }),
+    elements: { name: { value: " Buyer " }, scope: { value: "shop" }, unlocked: { checked: true } } };
+  await view.handlers.submit({ preventDefault() {}, target: form });
+  assert.deepEqual(calls.slice(1), ['POST /api/tokens {"name":"Buyer","scope":"shop"}', "GET /api/tokens"]);
+  assert.ok(view.innerHTML.includes("gt_secretvalue") && view.innerHTML.includes("will not be shown again"));
+  globalThis.confirm = () => false;
+  await view.handlers.click(btn("revoke", 2));
+  assert.equal(calls.length, 3, "declining sends nothing");
+  globalThis.confirm = () => true;
+  await view.handlers.click(btn("revoke", 2));
+  assert.deepEqual([calls.at(-1), redraws], ["DELETE /api/tokens/2", 1]);
+});
+
+test("order card: agent notes are listed, escaped, and absent when there are none", () => {
+  const log = [{ at: 1800000000, token: EVIL, action: "status: arrived" }];
+  assert.equal(agentNote({ at: 1800000000, token: "Shipping", action: "order: eta" }), "Shipping · order: eta · 2027-01-15");
+  const html = renderAgentLog({ agent_log: log });
+  assert.ok(html.includes("Agent notes") && html.includes("status: arrived") && !html.includes("<img"));
+  assert.equal(renderAgentLog({ agent_log: [] }), "");
+  assert.equal(renderAgentLog({}), "");
+  const places = { addresses: ADDRESSES, locations: LOCATIONS, school: false };
+  assert.ok(renderGiftPage(orderGift({ agent_log: log }), people4, "X", true, places).includes("Agent notes"));
+});
