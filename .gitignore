@@ -21,3 +21,4 @@ venv/
 
 # a second build's household values (see deploy/deploy.env.example)
 deploy/*.env
+.venv-mcp/

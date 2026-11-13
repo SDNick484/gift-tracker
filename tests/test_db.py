@@ -97,8 +97,8 @@ def _v2_database(path):
 def test_a_v2_database_migrates_to_v3_keeping_its_rows(tmp_path):
     c = _v2_database(tmp_path / "t.db")
     db.migrate(c)
-    assert db.SCHEMA_VERSION == 3
-    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "3"
+    assert db.SCHEMA_VERSION >= 3
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
     row = c.execute(f"SELECT title, status, santa, store, {', '.join(GIFT_V3_COLUMNS)} FROM gifts").fetchone()
     assert tuple(row) == ("Card", "given", 1, "Shop", None, None, None, 0, None, None, None, None)
     assert [tuple(r) for r in c.execute("SELECT gift_id, person_id, detail, done FROM gift_recipients")] == [(1, 1, "$35", 1)]
@@ -157,3 +157,80 @@ def test_deleting_a_location_deletes_its_sub_locations(con):
     con.execute("INSERT INTO locations (id, parent_id, name) VALUES (1, NULL, 'Garage'), (2, 1, 'Top shelf'), (3, 2, 'Blue bin')")
     con.execute("DELETE FROM locations WHERE id = 1")
     assert con.execute("SELECT COUNT(*) FROM locations").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- version 4: api tokens and agent notes
+def _v3_database(path):
+    """A database exactly as version 3 left it: an ordered gift with its order fields."""
+    c = db.connect(str(path))
+    for stmt in db._statements(db.SCHEMA):
+        c.execute(stmt)
+    db.MIGRATIONS[2](c)
+    db.MIGRATIONS[3](c)
+    c.execute("INSERT INTO meta VALUES ('schema_version', '3')")
+    c.execute("INSERT INTO people (id, name) VALUES (1, 'Jordan')")
+    c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
+    c.execute("INSERT INTO gifts (id, occasion_id, title, status, seller, ship_to_id, eta, ordered_by, created_by, "
+              "created_at, updated_at) VALUES (1, 1, 'Card', 'ordered', 'Shop', 1, '2026-12-09', 'Alex', 'a', 0, 0)")
+    c.execute("INSERT INTO gift_recipients (gift_id, person_id) VALUES (1, 1)")
+    return c
+
+
+def test_a_v3_database_migrates_to_v4_keeping_its_rows(tmp_path):
+    c = _v3_database(tmp_path / "t.db")
+    db.migrate(c)
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION) == "4"
+    assert tuple(c.execute("SELECT title, status, seller, ship_to_id, eta, ordered_by FROM gifts").fetchone()) == \
+        ("Card", "ordered", "Shop", 1, "2026-12-09", "Alex")
+    assert [tuple(r) for r in c.execute("SELECT label, is_home FROM addresses")] == [("Home", 1)]
+    assert c.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM gift_agent_log").fetchone()[0] == 0
+    db.migrate(c)  # again: nothing changes
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key='schema_version'").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM gifts").fetchone()[0] == 1
+    c.close()
+
+
+def test_a_fresh_database_has_the_v4_tables(con):
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('api_tokens')")] == \
+        ["id", "name", "scope", "token_hash", "unlocked", "created_at", "last_used_at", "revoked_at"]
+    assert [r[0] for r in con.execute("SELECT name FROM pragma_table_info('gift_agent_log')")] == \
+        ["id", "gift_id", "token_id", "at", "action"]
+    cols = {name: (type_, notnull, default) for name, type_, notnull, default in _shape(con, "api_tokens")}
+    assert cols["unlocked"] == ("INTEGER", 1, "0")
+    assert cols["last_used_at"] == ("INTEGER", 0, None) and cols["revoked_at"] == ("INTEGER", 0, None)
+
+
+def test_the_migrated_v4_tables_match_a_fresh_database(tmp_path, con):
+    c = _v3_database(tmp_path / "t.db")
+    db.migrate(c)
+    for table in ("api_tokens", "gift_agent_log"):
+        assert _shape(c, table) == _shape(con, table), table
+    c.close()
+
+
+def _token(con, id_, name, scope="delivery", token_hash=None):
+    con.execute("INSERT INTO api_tokens (id, name, scope, token_hash, created_at) VALUES (?, ?, ?, ?, 0)",
+                (id_, name, scope, token_hash or f"hash-{id_}"))
+
+
+def test_token_names_hashes_and_scopes_are_constrained(con):
+    _token(con, 1, "Shipping")
+    with pytest.raises(sqlite3.IntegrityError):
+        _token(con, 2, "Shipping")                       # a name is taken for good
+    with pytest.raises(sqlite3.IntegrityError):
+        _token(con, 3, "Other", token_hash="hash-1")     # a hash is unique
+    with pytest.raises(sqlite3.IntegrityError):
+        _token(con, 4, "Admin", scope="admin")
+    assert [tuple(r) for r in con.execute("SELECT id, name, scope, unlocked FROM api_tokens")] == [(1, "Shipping", "delivery", 0)]
+
+
+def test_deleting_a_gift_deletes_its_agent_notes(con):
+    _token(con, 1, "Shipping")
+    _gift_in(con, None)
+    con.execute("INSERT INTO gift_agent_log (gift_id, token_id, at, action) VALUES (1, 1, 0, 'status: arrived')")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO gift_agent_log (gift_id, token_id, at, action) VALUES (1, 99, 0, 'x')")
+    con.execute("DELETE FROM gifts WHERE id = 1")
+    assert con.execute("SELECT COUNT(*) FROM gift_agent_log").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0] == 1

@@ -16,7 +16,7 @@ DEV_EMAIL=alex@example.com ALLOWED_EMAILS=alex@example.com,sam@example.com \
 
 `DEV_EMAIL` admits requests from loopback that carry no Cloudflare headers, as that user. It is for development only and is never set on the server. Settings are documented at the top of `settings.py`. Add `MODE=school` (and a separate `DATA_DIR`) to try the school instance described under Deployment.
 
-The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/lists/<pending|to-wrap|where>`, `#/places`, `#/settings`).
+The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/lists/<pending|to-wrap|where>`, `#/places`, `#/settings`, `#/tokens`).
 
 Tests and lint:
 
@@ -35,6 +35,10 @@ shellcheck -s sh installer/setup-head.sh installer/build.sh ops/tracker-backup
 A gift from us moves `decided` to `ordered` to `arrived` to `wrapped`. Marking it ordered asks for the seller, a ship-to address and the expected date; an address other than Home shows a warning on the gift until you tick "Meant to ship there", so an order headed to the wrong house is caught while it can still be cancelled. Addresses are labels (Home, a relative's house), not street addresses, and exactly one is home. Settings links to the Places screen, where you keep the addresses and a tree of hiding places (Garage, Top shelf, Blue bin).
 
 Three lists, linked from the home screen with their counts: Not here yet (ordered, by expected date, red when overdue), To wrap (arrived, by recipient, with the hiding place) and Where is it? (arrived or wrapped, by hiding place). While the app is locked, a gift for a protected person is in none of them. In a school instance there are no hiding places and no Where is it? list.
+
+## Agents
+
+Agents use their own API, `/api/v1`, with a token made in Settings > Agent tokens (it needs the PIN, and is shown once). A token has one scope: `delivery` reads what is decided or ordered and records order details and arrivals, `shop` also reads ideas and budgets and marks gifts ordered, `full` does everything the agent API offers, adding gifts too. Every token is locked like a browser before the PIN: no protected gift, no Santa, no board, ever, unless it is a `full` token made to see them. Every write a token makes is noted on the gift with its name. An MCP server over the same API (`mcp_server.py`, and `mcp_http.py` as the `tracker-mcp` service) is how an owner's agent connects. Setup, the Cloudflare rules for `/api/v1` and the tools: `docs/mcp-setup.md`.
 
 ## Deployment
 
@@ -57,6 +61,8 @@ tail -n 40 /var/log/tracker.log
 ```
 
 Gunicorn runs as the unprivileged `tracker` user under OpenRC (`rc-service tracker status`). `sh setup-tracker.sh --uninstall` removes the app and service and keeps data, config and backups.
+
+The installer also sets up the MCP service, `tracker-mcp`, with its own user, pip venv and config (`/etc/conf.d/tracker-mcp`). It stays off until that config has an agent token and its Cloudflare settings; see `docs/mcp-setup.md`.
 
 ### Cloudflare Access
 

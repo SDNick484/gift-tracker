@@ -62,6 +62,14 @@ const renderShipWarning = (gift, addresses) => (gift.ship_warning
   ? `<p class="warn-note" role="alert">Ships to ${esc(addressLabel(addresses, gift.ship_to_id))}, not home. Cancel or change it while you still can, or tick "Meant to ship there".</p>`
   : "");
 const renderOrderedBy = gift => (gift.ordered_by ? `<p class="muted small">Ordered by ${esc(gift.ordered_by)}</p>` : "");
+// What agent tokens wrote on the gift (newest first), so a change nobody made by hand can be traced to its token.
+const agentDay = at => (Number.isInteger(at) ? new Date(at * 1000).toISOString().slice(0, 10) : "");
+export const agentNote = n => [n.token, n.action, agentDay(n.at)].join(" · ");
+const renderAgentNote = n => `<li>${esc(agentNote(n))}</li>`;
+const renderAgentNotes = notes => notes.map(renderAgentNote).join("");
+export const renderAgentLog = gift => (gift.agent_log?.length
+  ? `<div class="muted small"><p>Agent notes</p><ul class="agent-log">${renderAgentNotes(gift.agent_log)}</ul></div>`
+  : "");
 const renderLocationField = (gift, locations, school) => (school ? "" : `<label class="field"><span>Hidden</span><select name="location_id">${renderOptions(locationChoices(locations), gift.location_id)}</select></label>`);
 
 export const renderOrder = (gift, addresses, locations, school) => `
@@ -79,6 +87,7 @@ export const renderOrder = (gift, addresses, locations, school) => `
     </div>
     ${renderLocationField(gift, locations, school)}
     ${renderOrderedBy(gift)}
+    ${renderAgentLog(gift)}
     <p class="form-error" id="orderError" role="alert"></p>
     <div class="actions"><button class="btn primary" type="submit">Save order details</button></div>
   </form>`;

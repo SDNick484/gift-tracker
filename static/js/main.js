@@ -16,6 +16,7 @@ const SCREENS = {
   lists: () => import("./lists.js"),
   places: () => import("./places.js"),
   settings: () => import("./settings.js"),
+  tokens: () => import("./tokens.js"),
 };
 
 // In school mode these replace the screen of the same name, and the board is gone (see mode.js).

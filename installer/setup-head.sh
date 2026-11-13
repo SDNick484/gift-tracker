@@ -12,6 +12,9 @@
 # service, user, folders, config and port (8768 unless TRACKER_PORT says otherwise); nothing is shared with the
 # default install, which an unnamed run leaves exactly as it was.
 #   MODE=school sh setup-tracker.sh --instance school       (or TRACKER_INSTANCE=school; --uninstall takes it too)
+#
+# Each install also gets an MCP service, "<name>-mcp" (docs/mcp-setup.md): its own user, pip venv and config, holding
+# one agent token. It starts once that token and its Cloudflare settings are in /etc/conf.d/<name>-mcp.
 set -eu
 
 # instance-begin
@@ -32,11 +35,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$INSTANCE" in
-  "") NAME=tracker; DEFAULT_PORT=8767 ;;
+  "") NAME=tracker; DEFAULT_PORT=8767; MCP_DEFAULT_PORT=8779 ;;
   -*|*[!a-z0-9-]*) echo "An instance name uses lowercase letters, digits and hyphens, and does not start with a hyphen."; exit 1 ;;
   *)
     [ "${#INSTANCE}" -le 16 ] || { echo "An instance name is at most 16 characters."; exit 1; }
-    NAME=tracker-$INSTANCE; DEFAULT_PORT=8768 ;;
+    NAME=tracker-$INSTANCE; DEFAULT_PORT=8768; MCP_DEFAULT_PORT=8780 ;;
 esac
 APP_DIR=/opt/$NAME
 DATA_DIR=/var/lib/$NAME
@@ -47,6 +50,13 @@ LOG=/var/log/$NAME.log
 SVC_USER=$NAME
 BACKUP_JOB=/etc/periodic/daily/$NAME-backup
 LABEL=; if [ -n "$INSTANCE" ]; then LABEL=" ($NAME)"; fi
+# The MCP service of this install: its own name, user, folder, config, service and log.
+MCP_NAME=$NAME-mcp
+MCP_DIR=/opt/$MCP_NAME
+MCP_VENV=$MCP_DIR/venv
+MCP_CONF=/etc/conf.d/$MCP_NAME
+MCP_INITD=/etc/init.d/$MCP_NAME
+MCP_LOG=/var/log/$MCP_NAME.log
 # instance-end
 
 # Household values baked in by build.sh from deploy/deploy.env (first install only; the environment wins).
@@ -56,15 +66,18 @@ LABEL=; if [ -n "$INSTANCE" ]; then LABEL=" ($NAME)"; fi
 command -v apk >/dev/null || { echo "This installer is for Alpine (apk)."; exit 1; }
 
 if [ -n "$UNINSTALL" ]; then
-  rc-service "$NAME" stop >/dev/null 2>&1 || true
-  rc-update del "$NAME" default >/dev/null 2>&1 || true
-  rm -f "$INITD" "$BACKUP_JOB"
-  rm -rf "$APP_DIR"
-  echo "Removed the app, service and backup job. Kept $DATA_DIR, $CONF and $BACKUP_DIR."
+  for svc in "$MCP_NAME" "$NAME"; do
+    rc-service "$svc" stop >/dev/null 2>&1 || true
+    rc-update del "$svc" default >/dev/null 2>&1 || true
+  done
+  rm -f "$INITD" "$MCP_INITD" "$BACKUP_JOB"
+  rm -rf "$APP_DIR" "$MCP_DIR"
+  echo "Removed the app, its MCP service and the backup job. Kept $DATA_DIR, $CONF, $MCP_CONF and $BACKUP_DIR."
   exit 0
 fi
 
 conf_val() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | head -n1 | tr -d "\"'"; }
+mcp_val() { sed -n "s/^$1=//p" "$MCP_CONF" 2>/dev/null | head -n1 | tr -d "\"'"; }
 
 # An existing install keeps its port.
 PORT=${TRACKER_PORT:-$DEFAULT_PORT}
@@ -74,6 +87,7 @@ case "$PORT" in ""|*[!0-9]*) echo "TRACKER_PORT must be a number."; exit 1 ;; es
 echo "==> Installing packages"
 apk add --no-cache python3 py3-flask py3-gunicorn py3-jwt py3-cryptography sqlite ca-certificates >/dev/null
 
+rc-service "$MCP_NAME" stop >/dev/null 2>&1 || true
 rc-service "$NAME" stop >/dev/null 2>&1 || true
 if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$PORT\$"; then
   echo "Port $PORT is already in use by something else. Re-run with TRACKER_PORT=<free port>."; exit 1
@@ -113,6 +127,21 @@ add_setting "$CONF" LOCK_IDLE_SECONDS "${LOCK_IDLE_SECONDS:-300}" "Idle seconds 
 add_setting "$CONF" MODE "${MODE:-family}" "family (the default) or school: school makes this the staff-gift tracker, with no lock, no Santa and no boards"
 # Holds the household's emails, so root only: OpenRC runs as root and gives the service what it needs.
 chmod 600 "$CONF"; chown root:root "$CONF"
+APP_ADDED=${ADDED:-}; ADDED=
+
+# The MCP service's own config (OpenRC reads /etc/conf.d/<service> for it). Holds the agent token: root only.
+[ -f "$MCP_CONF" ] || printf '# Gift Tracker MCP service settings (docs/mcp-setup.md). After editing: rc-service %s restart\n' "$MCP_NAME" > "$MCP_CONF"
+add_setting "$MCP_CONF" TRACKER_API_TOKEN "" "An agent token made in the app (Settings > Agent tokens); its scope decides which tools the MCP service offers. Required."
+add_setting "$MCP_CONF" TRACKER_URL "http://127.0.0.1:$PORT" "Where the tracker listens (loopback; the MCP service never opens the database)"
+add_setting "$MCP_CONF" MCP_HTTP_BIND 127.0.0.1 "Address the MCP service listens on: cloudflared in this container reaches it on loopback"
+add_setting "$MCP_CONF" MCP_HTTP_PORT "$MCP_DEFAULT_PORT" "Port the MCP service listens on"
+add_setting "$MCP_CONF" MCP_HTTP_PATH "/$NAME/mcp" "URL path of the MCP endpoint (the tunnel route is ^/$NAME/)"
+add_setting "$MCP_CONF" MCP_PUBLIC_HOSTS "${MCP_PUBLIC_HOSTS:-}" "Public hostname of the MCP tunnel route, e.g. mcp.example.com. Required."
+add_setting "$MCP_CONF" CF_ACCESS_TEAM_DOMAIN "$(conf_val CF_TEAM_DOMAIN)" "Cloudflare team domain, e.g. yourteam.cloudflareaccess.com"
+add_setting "$MCP_CONF" CF_ACCESS_AUD "${CF_ACCESS_AUD:-}" "AUD tag of the Access application in front of the MCP hostname (not the tracker's own). Required."
+add_setting "$MCP_CONF" MCP_ALLOWED_EMAILS "${MCP_ALLOWED_EMAILS:-$(conf_val ALLOWED_EMAILS)}" "Only these Access emails may use the MCP tools (comma separated); empty = anyone Access lets in"
+chmod 600 "$MCP_CONF"; chown root:root "$MCP_CONF"
+MCP_ADDED=${ADDED:-}
 
 # ---------------------------------------------------------------- service
 # initd-begin
@@ -142,6 +171,42 @@ start_pre() {
 EOF
 # initd-end
 chmod 755 "$INITD"
+
+# The MCP service: its own user, which cannot read the database ($DATA_DIR is 750 and the app's), and no home.
+grep -q "^$MCP_NAME:" /etc/group || addgroup -S "$MCP_NAME"
+id "$MCP_NAME" >/dev/null 2>&1 || adduser -S -D -H -h /nonexistent -s /sbin/nologin -G "$MCP_NAME" "$MCP_NAME"
+# mcp-initd-begin
+# The template names the default install; @NAME@ and @MCP@ are filled in from the variables above.
+sed -e "s|@NAME@|$NAME|g" -e "s|@MCP@|$MCP_NAME|g" > "$MCP_INITD" <<'EOF'
+#!/sbin/openrc-run
+name="@MCP@"
+description="Gift Tracker MCP server (Streamable HTTP, behind Cloudflare Access)"
+supervisor="supervise-daemon"
+respawn_delay=10
+respawn_max=10
+respawn_period=600
+command="/opt/@MCP@/venv/bin/python"
+command_args="/opt/@NAME@/mcp_http.py"
+command_user="@MCP@:@MCP@"
+output_log="/var/log/@MCP@.log"
+error_log="/var/log/@MCP@.log"
+
+depend() { need net @NAME@; after firewall; }
+
+start_pre() {
+  export TRACKER_API_TOKEN TRACKER_URL MCP_HTTP_BIND MCP_HTTP_PORT MCP_HTTP_PATH MCP_PUBLIC_HOSTS CF_ACCESS_TEAM_DOMAIN CF_ACCESS_AUD MCP_ALLOWED_EMAILS
+  checkpath -f -o @MCP@:@MCP@ -m 0640 /var/log/@MCP@.log
+}
+EOF
+# mcp-initd-end
+chmod 755 "$MCP_INITD"
+
+# The MCP stack has no Alpine package (no py3-mcp), so this one service gets a pip venv. A pip or network failure
+# only leaves the MCP service off; the app itself still installs and starts.
+echo "==> Installing the MCP service's packages (pip venv in $MCP_VENV)"
+mkdir -p "$MCP_DIR"
+# shellcheck disable=SC2015  # deliberate: any failure in the chain (MCP_OK=1 included) falls through to the warning
+apk add --no-cache py3-pip >/dev/null 2>&1 && python3 -m venv "$MCP_VENV" && "$MCP_VENV/bin/pip" install --no-cache-dir -q -r "$APP_DIR/requirements-mcp.txt" && MCP_OK=1 || { MCP_OK=0; echo "    WARNING: could not set up the MCP venv (it needs PyPI); $MCP_NAME will not start. Re-run this installer to retry."; }
 
 echo "==> Installing the nightly backup"
 mkdir -p /etc/periodic/daily
@@ -177,11 +242,38 @@ done
 echo "==> Taking a first backup"
 "$BACKUP_JOB" || echo "    (backup reported a problem; see /var/log/$NAME-backup.log)"
 
+# The MCP service starts only once it has a token and its Cloudflare settings (it refuses to start without them).
+MCP_STATE=off
+if [ "${MCP_OK:-0}" = 1 ] && [ -n "$(mcp_val TRACKER_API_TOKEN)" ] && [ -n "$(mcp_val CF_ACCESS_AUD)" ] && [ -n "$(mcp_val MCP_PUBLIC_HOSTS)" ]; then
+  echo "==> Starting $MCP_NAME"
+  rc-service "$MCP_NAME" start >/dev/null 2>&1 || true
+  MCP_STATE=failed
+  i=0
+  while [ "$i" -lt 15 ]; do
+    wget -qO- "http://$(mcp_val MCP_HTTP_BIND):$(mcp_val MCP_HTTP_PORT)/healthz" >/dev/null 2>&1 && { MCP_STATE=up; break; }
+    i=$((i + 1)); sleep 1
+  done
+  if [ "$MCP_STATE" = up ]; then rc-update add "$MCP_NAME" default >/dev/null 2>&1 || true
+  else echo "    $MCP_NAME did not answer; see $MCP_LOG"; tail -n 10 "$MCP_LOG" 2>/dev/null || true; fi
+fi
+
 echo
 echo "Gift Tracker${LABEL:-} is running on 127.0.0.1:$PORT (loopback only)."
-[ -n "${ADDED:-}" ] && echo "Settings added to $CONF:$ADDED"
+[ -n "${APP_ADDED:-}" ] && echo "Settings added to $CONF:$APP_ADDED"
+[ -n "${MCP_ADDED:-}" ] && echo "Settings added to $MCP_CONF:$MCP_ADDED"
 if [ -z "$(conf_val ALLOWED_EMAILS)" ] || [ -z "$(conf_val CF_AUD)" ] || [ -z "$(conf_val CF_TEAM_DOMAIN)" ]; then
   echo "Not usable yet: set ALLOWED_EMAILS, USERS, CF_TEAM_DOMAIN and CF_AUD in $CONF, then: rc-service $NAME restart"
 fi
 echo "Point the Cloudflare Tunnel at http://127.0.0.1:$PORT (cloudflared in this container)."
+case "$MCP_STATE" in
+  up) echo "MCP service $MCP_NAME is running: tunnel route mcp.<your-domain>, path ^/$NAME/ -> http://$(mcp_val MCP_HTTP_BIND):$(mcp_val MCP_HTTP_PORT)" ;;
+  failed) echo "MCP service $MCP_NAME did not come up: see $MCP_LOG" ;;
+  *)
+    echo "MCP service $MCP_NAME is off (docs/mcp-setup.md). To turn it on:"
+    [ "${MCP_OK:-0}" = 1 ] || echo "  - re-run this installer when PyPI is reachable (the MCP venv could not be built)"
+    for k in TRACKER_API_TOKEN MCP_PUBLIC_HOSTS CF_ACCESS_AUD; do
+      [ -n "$(mcp_val "$k")" ] || echo "  - set $k in $MCP_CONF"
+    done
+    echo "  - then: rc-service $MCP_NAME start && rc-update add $MCP_NAME default" ;;
+esac
 exit 0

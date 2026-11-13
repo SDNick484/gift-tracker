@@ -299,3 +299,98 @@ def test_mode_is_baked_from_the_env_file_and_the_environment_wins(tmp_path):
     out = open(os.path.join(repo, "dist", "setup-tracker.sh")).read()
     assert ': "${MODE:=school}"' in out
     subprocess.run(["sh", "-n", os.path.join(repo, "dist", "setup-tracker.sh")], check=True)
+
+
+# ---------------------------------------------------------------- the MCP service (docs/mcp-setup.md)
+MCP_VARS = ("MCP_NAME", "MCP_DIR", "MCP_VENV", "MCP_CONF", "MCP_INITD", "MCP_LOG", "MCP_DEFAULT_PORT")
+DEFAULT_MCP_INIT = """#!/sbin/openrc-run
+name="tracker-mcp"
+description="Gift Tracker MCP server (Streamable HTTP, behind Cloudflare Access)"
+supervisor="supervise-daemon"
+respawn_delay=10
+respawn_max=10
+respawn_period=600
+command="/opt/tracker-mcp/venv/bin/python"
+command_args="/opt/tracker/mcp_http.py"
+command_user="tracker-mcp:tracker-mcp"
+output_log="/var/log/tracker-mcp.log"
+error_log="/var/log/tracker-mcp.log"
+
+depend() { need net tracker; after firewall; }
+
+start_pre() {
+  export TRACKER_API_TOKEN TRACKER_URL MCP_HTTP_BIND MCP_HTTP_PORT MCP_HTTP_PATH MCP_PUBLIC_HOSTS CF_ACCESS_TEAM_DOMAIN CF_ACCESS_AUD MCP_ALLOWED_EMAILS
+  checkpath -f -o tracker-mcp:tracker-mcp -m 0640 /var/log/tracker-mcp.log
+}
+"""  # noqa: E501
+MCP_SETTINGS = {"TRACKER_API_TOKEN", "TRACKER_URL", "MCP_HTTP_BIND", "MCP_HTTP_PORT", "MCP_HTTP_PATH", "MCP_PUBLIC_HOSTS",
+                "CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "MCP_ALLOWED_EMAILS"}
+
+
+def run_mcp_fragments(args=(), initd=None):
+    """The instance block, then (with a path) the MCP service template writing there. Returns (values, script text)."""
+    env = {k: v for k, v in os.environ.items() if k != "TRACKER_INSTANCE"}
+    script = "set -eu\n" + fragment("instance-begin", "instance-end")
+    script += "".join(f'printf "%s=%s\\n" {v} "${{{v}}}"\n' for v in MCP_VARS)
+    if initd:
+        script += f'MCP_INITD="{initd}"\n' + fragment("mcp-initd-begin", "mcp-initd-end")
+    r = subprocess.run(["sh", "-c", script, "sh", *args], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    values = dict(line.split("=", 1) for line in r.stdout.splitlines() if line.split("=", 1)[0] in MCP_VARS)
+    return values, (open(initd).read() if initd else None)
+
+
+def test_the_mcp_service_of_the_default_install(tmp_path):
+    values, text = run_mcp_fragments(initd=str(tmp_path / "tracker-mcp"))
+    assert values == {"MCP_NAME": "tracker-mcp", "MCP_DIR": "/opt/tracker-mcp", "MCP_VENV": "/opt/tracker-mcp/venv",
+                      "MCP_CONF": "/etc/conf.d/tracker-mcp", "MCP_INITD": "/etc/init.d/tracker-mcp",
+                      "MCP_LOG": "/var/log/tracker-mcp.log", "MCP_DEFAULT_PORT": "8779"}
+    assert text == DEFAULT_MCP_INIT
+
+
+def test_a_named_instance_has_its_own_mcp_service(tmp_path):
+    values, text = run_mcp_fragments(["--instance", "school"], initd=str(tmp_path / "tracker-school-mcp"))
+    assert values["MCP_NAME"] == "tracker-school-mcp" and values["MCP_DEFAULT_PORT"] == "8780"
+    assert values["MCP_CONF"] == "/etc/conf.d/tracker-school-mcp" and values["MCP_VENV"] == "/opt/tracker-school-mcp/venv"
+    assert 'command_args="/opt/tracker-school/mcp_http.py"' in text and "need net tracker-school;" in text
+    assert 'command_user="tracker-school-mcp:tracker-school-mcp"' in text
+    assert not re.search(r"/(opt|var/log)/tracker(?![-\w])", text) and not re.search(r"/opt/tracker-mcp\b", text)
+
+
+def test_the_mcp_settings_live_in_their_own_config_and_reach_the_service():
+    head = open(HEAD).read()
+    mcp = set(re.findall(r'^add_setting "\$MCP_CONF" ([A-Z_]+) ', head, re.M))
+    assert mcp == MCP_SETTINGS
+    assert not mcp & set(re.findall(r'^add_setting "\$CONF" ([A-Z_]+) ', head, re.M)), "the token never goes in the app's config"
+    exported = set(DEFAULT_MCP_INIT.split("export ", 1)[1].split("\n", 1)[0].split())
+    assert exported == MCP_SETTINGS
+    source = open(os.path.join(ROOT, "mcp_http.py")).read() + open(os.path.join(ROOT, "mcp_remote.py")).read()
+    assert all(name in source for name in MCP_SETTINGS), "every setting is one the service reads"
+    assert 'add_setting "$MCP_CONF" MCP_HTTP_BIND 127.0.0.1 ' in head and 'add_setting "$MCP_CONF" TRACKER_API_TOKEN "" ' in head
+    assert 'chmod 600 "$MCP_CONF"; chown root:root "$MCP_CONF"' in head
+
+
+def test_uninstall_and_upgrade_handle_the_mcp_service_too():
+    text = open(HEAD).read()
+    uninstall = text.split('if [ -n "$UNINSTALL" ]; then', 1)[1].split("exit 0", 1)[0]
+    assert 'for svc in "$MCP_NAME" "$NAME"; do' in uninstall
+    assert 'rm -f "$INITD" "$MCP_INITD" "$BACKUP_JOB"' in uninstall and 'rm -rf "$APP_DIR" "$MCP_DIR"' in uninstall
+    assert 'rc-service "$MCP_NAME" stop >/dev/null 2>&1 || true\nrc-service "$NAME" stop' in text
+    assert '"$MCP_VENV/bin/pip" install --no-cache-dir -q -r "$APP_DIR/requirements-mcp.txt"' in text
+
+
+def test_the_payload_ships_the_mcp_requirements():
+    build()
+    shipped = payload_names(os.path.join(ROOT, "dist", "setup-tracker.sh"))
+    assert {"tracker/requirements-mcp.txt", "tracker/mcp_server.py", "tracker/mcp_http.py", "tracker/mcp_remote.py"} <= shipped
+
+
+def test_the_mcp_household_values_are_baked_but_never_a_token(tmp_path):
+    repo = mini_repo(tmp_path, deploy_env="MCP_PUBLIC_HOSTS=mcp.example.com\nCF_ACCESS_AUD=aud-mcp\nMCP_ALLOWED_EMAILS=alex@example.com\n"
+                                          "TRACKER_API_TOKEN=gt_never_baked\n")
+    build(repo)  # no requirements-mcp.txt in the mini repo: the build still works
+    out = open(os.path.join(repo, "dist", "setup-tracker.sh")).read()
+    assert ': "${MCP_PUBLIC_HOSTS:=mcp.example.com}"' in out and ': "${CF_ACCESS_AUD:=aud-mcp}"' in out
+    assert ': "${MCP_ALLOWED_EMAILS:=alex@example.com}"' in out
+    assert "gt_never_baked" not in out
+    subprocess.run(["sh", "-n", os.path.join(repo, "dist", "setup-tracker.sh")], check=True)
