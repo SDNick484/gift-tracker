@@ -337,6 +337,7 @@ def occasion_plan_remove(occasion_id, person_id):
 # may not give a gift a protected recipient or touch Santa (423), and gift JSON carries no `santa` key.
 def gift_json(row):
     out = gifts.to_json(db(), row, unlocked=unlocked())
+    out["agent_log"] = tokens.gift_log(db(), row["id"])  # what agent tokens wrote on it, newest first
     if is_school():
         out.pop("santa", None)  # school mode has no Santa, whatever the column says
         out.pop("location_id", None)  # nor hiding places
@@ -575,6 +576,54 @@ def tokens_revoke(token_id):
 @app.get("/api/v1/me")
 def v1_me():
     return jsonify(agent.me(g.token))
+
+
+@app.get("/api/v1/occasions")
+def v1_occasions():
+    return jsonify(agent.occasion_list(db()))
+
+
+@app.get("/api/v1/addresses")
+def v1_addresses():
+    return jsonify(agent.address_list(db()))
+
+
+@app.get("/api/v1/people")
+def v1_people():
+    return jsonify(agent.people_list(db(), g.token))
+
+
+@app.get("/api/v1/occasions/<int:occasion>/budgets")
+def v1_budgets(occasion):
+    return jsonify(agent.budget_list(db(), occasion, g.token))
+
+
+@app.get("/api/v1/gifts")
+def v1_gifts():
+    return jsonify(agent.list_gifts(db(), g.token, request.args))
+
+
+@app.post("/api/v1/gifts")
+def v1_gift_create():
+    gid = agent.create_gift(db(), json_body(), g.token)
+    return jsonify(agent.gift_json(db(), agent.visible_row(db(), gid, g.token), g.token)), 201
+
+
+@app.get("/api/v1/gifts/<int:gift>")
+def v1_gift(gift):
+    return jsonify(agent.gift_json(db(), agent.visible_row(db(), gift, g.token), g.token))
+
+
+@app.patch("/api/v1/gifts/<int:gift>/order")
+def v1_gift_order(gift):
+    agent.update_order(db(), gift, json_body(), g.token)
+    return jsonify(agent.gift_json(db(), agent.visible_row(db(), gift, g.token), g.token))
+
+
+@app.post("/api/v1/gifts/<int:gift>/status")
+def v1_gift_status(gift):
+    agent.set_status(db(), gift, json_body(), g.token)
+    return jsonify(agent.gift_json(db(), agent.visible_row(db(), gift, g.token), g.token))
 
 
 init_db()

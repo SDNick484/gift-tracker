@@ -47,6 +47,9 @@ def args(w):
         "address_id": [*(r[0] for r in con_rows("SELECT id FROM addresses ORDER BY id")), 999999],
         "location_id": [999999],
         "token_id": [1, 999999],
+        # /api/v1 (bearer tokens only; this walk's Cloudflare identity gets 401 there, tests/test_agent_privacy.py walks it with tokens)
+        "gift": [*w.secret, w.visible, 999999],
+        "occasion": [i.o],
     }
 
 
