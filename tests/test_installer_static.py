@@ -138,3 +138,164 @@ def test_backup_is_private_valid_and_prunes_old_copies(tmp_path):
 def test_backup_with_no_database_is_not_an_error(tmp_path):
     env = {**os.environ, "DATA_DIR": str(tmp_path / "none"), "BACKUP_DIR": str(tmp_path / "b"), "LOG": str(tmp_path / "log")}
     subprocess.run(["sh", os.path.join(ROOT, "ops", "tracker-backup")], check=True, env=env)
+
+
+# ---------------------------------------------------------------- instance names (a second install on one container)
+HEAD = os.path.join(ROOT, "installer", "setup-head.sh")
+NAME_VARS = ("NAME", "APP_DIR", "DATA_DIR", "BACKUP_DIR", "CONF", "INITD", "LOG", "SVC_USER", "BACKUP_JOB", "DEFAULT_PORT", "LABEL")
+
+DEFAULT_VALUES = {
+    "NAME": "tracker", "APP_DIR": "/opt/tracker", "DATA_DIR": "/var/lib/tracker", "BACKUP_DIR": "/var/backups/tracker",
+    "CONF": "/etc/conf.d/tracker", "INITD": "/etc/init.d/tracker", "LOG": "/var/log/tracker.log", "SVC_USER": "tracker",
+    "BACKUP_JOB": "/etc/periodic/daily/tracker-backup", "DEFAULT_PORT": "8767", "LABEL": "",
+}
+
+# The service script of a default install: what the installer wrote before instance names existed, plus MODE in
+# the exported names (a new setting). Any other difference is a change to the default install.
+DEFAULT_INIT = """#!/sbin/openrc-run
+name="tracker"
+description="Gift Tracker (Flask + gunicorn, loopback only)"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=10
+respawn_period=600
+command="/usr/bin/gunicorn"
+command_user="tracker"
+output_log="/var/log/tracker.log"
+error_log="/var/log/tracker.log"
+
+depend() { need net; after firewall; }
+
+start_pre() {
+  : ${TRACKER_PORT:=8767}
+  command_args="--preload --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:${TRACKER_PORT} --chdir /opt/tracker --error-logfile /var/log/tracker.log app:app"
+  export HOME=/var/lib/tracker DATA_DIR=/var/lib/tracker
+  export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE
+  checkpath -f -o tracker:tracker -m 0640 /var/log/tracker.log
+}
+"""  # noqa: E501  (the golden text has the installer's long command_args line)
+
+
+def fragment(begin, end):
+    """The part of the installer between `# <begin>` and `# <end>` marker lines: the tests run exactly that."""
+    m = re.search(rf"^# {begin}\n(.*?)^# {end}\n", open(HEAD).read(), re.S | re.M)
+    assert m, f"markers {begin}/{end} not found in installer/setup-head.sh"
+    return m.group(1)
+
+
+def run_fragments(args=(), instance_env=None, initd=None):
+    """Run the instance fragment (and, with a path, the init-script fragment writing there) the way the installer
+    does, with `args` as its arguments. Returns (exit status, output, variables, init script text or None)."""
+    env = {k: v for k, v in os.environ.items() if k != "TRACKER_INSTANCE"}
+    env.update(instance_env or {})
+    script = "set -eu\n" + fragment("instance-begin", "instance-end")
+    script += "".join(f'printf "%s=%s\\n" {v} "${{{v}}}"\n' for v in NAME_VARS)
+    if initd:
+        script += f'INITD="{initd}"\n' + fragment("initd-begin", "initd-end")
+    r = subprocess.run(["sh", "-c", script, "sh", *args], env=env, capture_output=True, text=True)
+    values = dict(line.split("=", 1) for line in r.stdout.splitlines() if line.split("=", 1)[0] in NAME_VARS)
+    text = open(initd).read() if initd and r.returncode == 0 else None
+    return r.returncode, r.stdout + r.stderr, values, text
+
+
+def test_default_install_names_paths_and_port_are_unchanged():
+    status, _, values, _ = run_fragments()
+    assert status == 0 and values == DEFAULT_VALUES
+
+
+def test_default_service_script_is_what_it_was(tmp_path):
+    status, _, _, text = run_fragments(initd=str(tmp_path / "tracker"))
+    assert status == 0 and text == DEFAULT_INIT
+
+
+def test_uninstall_alone_still_means_the_default_install():
+    status, _, values, _ = run_fragments(["--uninstall"])
+    assert status == 0 and values == DEFAULT_VALUES
+
+
+def test_an_instance_gets_its_own_names_paths_user_and_port(tmp_path):
+    status, _, values, text = run_fragments(["--instance", "school"], initd=str(tmp_path / "tracker-school"))
+    assert status == 0
+    assert values == {
+        "NAME": "tracker-school", "APP_DIR": "/opt/tracker-school", "DATA_DIR": "/var/lib/tracker-school",
+        "BACKUP_DIR": "/var/backups/tracker-school", "CONF": "/etc/conf.d/tracker-school", "INITD": "/etc/init.d/tracker-school",
+        "LOG": "/var/log/tracker-school.log", "SVC_USER": "tracker-school", "BACKUP_JOB": "/etc/periodic/daily/tracker-school-backup",
+        "DEFAULT_PORT": "8768", "LABEL": " (tracker-school)",
+    }
+    for key, default in DEFAULT_VALUES.items():                   # nothing is shared with the default install
+        if key not in ("LABEL", "DEFAULT_PORT"):
+            assert values[key] != default, key
+    assert 'name="tracker-school"' in text and 'command_user="tracker-school"' in text
+    assert "--chdir /opt/tracker-school --error-logfile /var/log/tracker-school.log" in text
+    assert "export HOME=/var/lib/tracker-school DATA_DIR=/var/lib/tracker-school" in text
+    assert ": ${TRACKER_PORT:=8768}" in text and "checkpath -f -o tracker-school:tracker-school -m 0640 /var/log/tracker-school.log" in text
+    assert "127.0.0.1:${TRACKER_PORT}" in text
+    # the only lines that differ from a default install are the ones that name it
+    assert [line for line in text.splitlines() if line not in DEFAULT_INIT.splitlines()] and "/opt/tracker " not in text
+    assert not re.search(r"/(opt|var/lib|var/log)/tracker\b(?!-)", text) and 'name="tracker"' not in text
+
+
+@pytest.mark.parametrize("how", [["--instance", "school"], ["--instance=school"]])
+def test_the_flag_and_the_environment_name_the_same_instance(how):
+    flag = run_fragments(how)[2]
+    assert flag["NAME"] == "tracker-school"
+    assert run_fragments(instance_env={"TRACKER_INSTANCE": "school"})[2] == flag
+    assert run_fragments(["--uninstall", *how])[2] == flag
+    assert run_fragments([*how, "--uninstall"])[2] == flag
+
+
+def test_the_flag_wins_over_the_environment():
+    assert run_fragments(["--instance", "b"], instance_env={"TRACKER_INSTANCE": "a"})[2]["NAME"] == "tracker-b"
+
+
+def test_a_generic_environment_variable_does_not_rename_the_install():
+    """INSTANCE and NAME are common names in other tooling; only TRACKER_INSTANCE counts."""
+    assert run_fragments(instance_env={"INSTANCE": "i-0abc", "NAME": "box"})[2] == DEFAULT_VALUES
+
+
+@pytest.mark.parametrize("bad", ["School", "a b", "-x", "a/b", "a.b", "a_b", "x" * 17, "../x", "a;b", "$(id)", "ü"])
+def test_a_bad_instance_name_is_refused(bad):
+    status, out, values, _ = run_fragments(["--instance", bad])
+    assert status == 1 and values == {} and "instance name" in out
+
+
+@pytest.mark.parametrize("args", [["--instnace", "school"], ["school"], ["--instance"], ["--instance="], ["--uninstal"]])
+def test_a_mistyped_argument_is_refused_instead_of_touching_the_default_install(args):
+    status, out, values, _ = run_fragments(args)
+    assert status == 1 and values == {}, out
+
+
+def test_a_name_of_sixteen_characters_is_accepted():
+    assert run_fragments(["--instance", "a" * 16])[2]["NAME"] == "tracker-" + "a" * 16
+
+
+def test_the_installer_only_acts_on_names_from_the_instance_block():
+    """No path, service or user of the default install is left hard-coded outside the template and the block."""
+    text = open(HEAD).read()
+    outside = text.replace(fragment("instance-begin", "instance-end"), "").replace(fragment("initd-begin", "initd-end"), "")
+    outside = "\n".join(line for line in outside.splitlines() if not line.lstrip().startswith("#"))
+    assert not re.search(r"/(opt|var/lib|var/backups|var/log|etc/conf\.d|etc/init\.d)/tracker\b", outside.replace("/opt/tracker.new", "")), outside
+    assert "rc-service tracker" not in outside and "rc-update add tracker" not in outside
+
+
+def test_a_named_instances_daily_backup_runs_the_script_on_its_own_folders():
+    text = open(HEAD).read()
+    assert 'printf \'DATA_DIR=%s; BACKUP_DIR=%s; LOG=/var/log/%s-backup.log\\n\' "$DATA_DIR" "$BACKUP_DIR" "$NAME"' in text
+    assert "export DATA_DIR BACKUP_DIR LOG" in text and 'exec %s/ops/tracker-backup' in text
+    assert 'install -m 755 "$APP_DIR/ops/tracker-backup" "$BACKUP_JOB"' in text    # the default install's job is the script itself
+
+
+def test_the_built_installer_has_the_instance_support_and_still_parses():
+    build()
+    built = open(os.path.join(ROOT, "dist", "setup-tracker.sh")).read()
+    assert "# instance-begin" in built and "--instance" in built
+    subprocess.run(["sh", "-n", "dist/setup-tracker.sh"], cwd=ROOT, check=True)
+    assert "DEV_EMAIL" not in built and "0.0.0.0" not in built
+
+
+def test_mode_is_baked_from_the_env_file_and_the_environment_wins(tmp_path):
+    repo = mini_repo(tmp_path, deploy_env="MODE=school\nAPP_NAME=Ledger\n")
+    build(repo)
+    out = open(os.path.join(repo, "dist", "setup-tracker.sh")).read()
+    assert ': "${MODE:=school}"' in out
+    subprocess.run(["sh", "-n", os.path.join(repo, "dist", "setup-tracker.sh")], check=True)

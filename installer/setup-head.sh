@@ -7,12 +7,47 @@
 #   sh setup-tracker.sh               install / upgrade
 #   TRACKER_PORT=8768 sh setup-tracker.sh      first install on another port
 #   sh setup-tracker.sh --uninstall   remove app and service (keeps data, config and backups)
+#
+# A second, independent instance (say the school one) on the same container: give it a name. It gets its own
+# service, user, folders, config and port (8768 unless TRACKER_PORT says otherwise); nothing is shared with the
+# default install, which an unnamed run leaves exactly as it was.
+#   MODE=school sh setup-tracker.sh --instance school       (or TRACKER_INSTANCE=school; --uninstall takes it too)
 set -eu
-APP_DIR=/opt/tracker
-DATA_DIR=/var/lib/tracker
-BACKUP_DIR=/var/backups/tracker
-CONF=/etc/conf.d/tracker
-SVC_USER=tracker
+
+# instance-begin
+# The names and paths of this install. No instance name: the default install (service "tracker", port 8767).
+# With one: "tracker-<name>" everywhere, so two installs never share a service, user, folder or log.
+INSTANCE=${TRACKER_INSTANCE:-}
+UNINSTALL=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --uninstall) UNINSTALL=1 ;;
+    --instance)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then echo "--instance needs a name."; exit 1; fi
+      INSTANCE=$2; shift ;;
+    --instance=) echo "--instance needs a name."; exit 1 ;;
+    --instance=*) INSTANCE=${1#--instance=} ;;
+    *) echo "Unknown argument: $1 (use --instance <name> or --uninstall)."; exit 1 ;;
+  esac
+  shift
+done
+case "$INSTANCE" in
+  "") NAME=tracker; DEFAULT_PORT=8767 ;;
+  -*|*[!a-z0-9-]*) echo "An instance name uses lowercase letters, digits and hyphens, and does not start with a hyphen."; exit 1 ;;
+  *)
+    [ "${#INSTANCE}" -le 16 ] || { echo "An instance name is at most 16 characters."; exit 1; }
+    NAME=tracker-$INSTANCE; DEFAULT_PORT=8768 ;;
+esac
+APP_DIR=/opt/$NAME
+DATA_DIR=/var/lib/$NAME
+BACKUP_DIR=/var/backups/$NAME
+CONF=/etc/conf.d/$NAME
+INITD=/etc/init.d/$NAME
+LOG=/var/log/$NAME.log
+SVC_USER=$NAME
+BACKUP_JOB=/etc/periodic/daily/$NAME-backup
+LABEL=; if [ -n "$INSTANCE" ]; then LABEL=" ($NAME)"; fi
+# instance-end
 
 # Household values baked in by build.sh from deploy/deploy.env (first install only; the environment wins).
 # __DEPLOY_DEFAULTS__
@@ -20,10 +55,10 @@ SVC_USER=tracker
 [ "$(id -u)" = 0 ] || { echo "Run as root."; exit 1; }
 command -v apk >/dev/null || { echo "This installer is for Alpine (apk)."; exit 1; }
 
-if [ "${1:-}" = "--uninstall" ]; then
-  rc-service tracker stop >/dev/null 2>&1 || true
-  rc-update del tracker default >/dev/null 2>&1 || true
-  rm -f /etc/init.d/tracker /etc/periodic/daily/tracker-backup
+if [ -n "$UNINSTALL" ]; then
+  rc-service "$NAME" stop >/dev/null 2>&1 || true
+  rc-update del "$NAME" default >/dev/null 2>&1 || true
+  rm -f "$INITD" "$BACKUP_JOB"
   rm -rf "$APP_DIR"
   echo "Removed the app, service and backup job. Kept $DATA_DIR, $CONF and $BACKUP_DIR."
   exit 0
@@ -32,14 +67,14 @@ fi
 conf_val() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | head -n1 | tr -d "\"'"; }
 
 # An existing install keeps its port.
-PORT=${TRACKER_PORT:-8767}
-[ -f "$CONF" ] && PORT=$(conf_val TRACKER_PORT) && PORT=${PORT:-8767}
+PORT=${TRACKER_PORT:-$DEFAULT_PORT}
+[ -f "$CONF" ] && PORT=$(conf_val TRACKER_PORT) && PORT=${PORT:-$DEFAULT_PORT}
 case "$PORT" in ""|*[!0-9]*) echo "TRACKER_PORT must be a number."; exit 1 ;; esac
 
 echo "==> Installing packages"
 apk add --no-cache python3 py3-flask py3-gunicorn py3-jwt py3-cryptography sqlite ca-certificates >/dev/null
 
-rc-service tracker stop >/dev/null 2>&1 || true
+rc-service "$NAME" stop >/dev/null 2>&1 || true
 if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$PORT\$"; then
   echo "Port $PORT is already in use by something else. Re-run with TRACKER_PORT=<free port>."; exit 1
 fi
@@ -67,7 +102,7 @@ add_setting() {  # add_setting FILE KEY VALUE COMMENT: only if KEY is not there 
   printf '\n# %s\n%s="%s"\n' "$4" "$2" "$3" >> "$1"
   ADDED="${ADDED:-} $2"
 }
-[ -f "$CONF" ] || printf '# Gift Tracker settings. After editing: rc-service tracker restart\n' > "$CONF"
+[ -f "$CONF" ] || printf '# Gift Tracker settings. After editing: rc-service %s restart\n' "$NAME" > "$CONF"
 add_setting "$CONF" TRACKER_PORT "$PORT" "Port gunicorn listens on. It binds 127.0.0.1 only: cloudflared in this container is the one way in."
 add_setting "$CONF" ALLOWED_EMAILS "${ALLOWED_EMAILS:-}" "The two owners' emails (comma separated). Nobody else is admitted, whatever Access says."
 add_setting "$CONF" USERS "${USERS:-}" "Display names: a@example.com=Alex,b@example.com=Sam"
@@ -80,59 +115,73 @@ add_setting "$CONF" MODE "${MODE:-family}" "family (the default) or school: scho
 chmod 600 "$CONF"; chown root:root "$CONF"
 
 # ---------------------------------------------------------------- service
-cat > /etc/init.d/tracker <<'EOF'
+# initd-begin
+# The template names the default install; @NAME@ and @DEFAULT_PORT@ are filled in from the variables above.
+sed -e "s|@NAME@|$NAME|g" -e "s|@DEFAULT_PORT@|$DEFAULT_PORT|g" > "$INITD" <<'EOF'
 #!/sbin/openrc-run
-name="tracker"
+name="@NAME@"
 description="Gift Tracker (Flask + gunicorn, loopback only)"
 supervisor="supervise-daemon"
 respawn_delay=5
 respawn_max=10
 respawn_period=600
 command="/usr/bin/gunicorn"
-command_user="tracker"
-output_log="/var/log/tracker.log"
-error_log="/var/log/tracker.log"
+command_user="@NAME@"
+output_log="/var/log/@NAME@.log"
+error_log="/var/log/@NAME@.log"
 
 depend() { need net; after firewall; }
 
 start_pre() {
-  : ${TRACKER_PORT:=8767}
-  command_args="--preload --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:${TRACKER_PORT} --chdir /opt/tracker --error-logfile /var/log/tracker.log app:app"
-  export HOME=/var/lib/tracker DATA_DIR=/var/lib/tracker
+  : ${TRACKER_PORT:=@DEFAULT_PORT@}
+  command_args="--preload --workers 2 --threads 4 --timeout 60 --bind 127.0.0.1:${TRACKER_PORT} --chdir /opt/@NAME@ --error-logfile /var/log/@NAME@.log app:app"
+  export HOME=/var/lib/@NAME@ DATA_DIR=/var/lib/@NAME@
   export TRACKER_PORT ALLOWED_EMAILS USERS CF_TEAM_DOMAIN CF_AUD APP_NAME LOCK_IDLE_SECONDS MODE
-  checkpath -f -o tracker:tracker -m 0640 /var/log/tracker.log
+  checkpath -f -o @NAME@:@NAME@ -m 0640 /var/log/@NAME@.log
 }
 EOF
-chmod 755 /etc/init.d/tracker
+# initd-end
+chmod 755 "$INITD"
 
 echo "==> Installing the nightly backup"
 mkdir -p /etc/periodic/daily
-install -m 755 "$APP_DIR/ops/tracker-backup" /etc/periodic/daily/tracker-backup
+if [ -z "$INSTANCE" ]; then
+  install -m 755 "$APP_DIR/ops/tracker-backup" "$BACKUP_JOB"
+else
+  # The backup script defaults to the default install's folders: a named instance's job says where its own are.
+  {
+    printf '#!/bin/sh\n'
+    printf 'DATA_DIR=%s; BACKUP_DIR=%s; LOG=/var/log/%s-backup.log\n' "$DATA_DIR" "$BACKUP_DIR" "$NAME"
+    printf 'export DATA_DIR BACKUP_DIR LOG\n'
+    printf 'exec %s/ops/tracker-backup\n' "$APP_DIR"
+  } > "$BACKUP_JOB"
+  chmod 755 "$BACKUP_JOB"
+fi
 rc-update add crond default >/dev/null 2>&1 || true
 rc-service crond start >/dev/null 2>&1 || true
 
-rc-update add tracker default >/dev/null 2>&1 || true
-rc-service tracker start >/dev/null 2>&1 || true
+rc-update add "$NAME" default >/dev/null 2>&1 || true
+rc-service "$NAME" start >/dev/null 2>&1 || true
 
 echo "==> Waiting for the app"
 i=0
 until wget -qO- "http://127.0.0.1:$PORT/healthz" 2>/dev/null | grep -q ok; do
   i=$((i + 1))
   if [ "$i" -ge 20 ]; then
-    echo "The service did not answer. Check: tail -n 40 /var/log/tracker.log"
+    echo "The service did not answer. Check: tail -n 40 $LOG"
     exit 1
   fi
   sleep 1
 done
 
 echo "==> Taking a first backup"
-/etc/periodic/daily/tracker-backup || echo "    (backup reported a problem; see /var/log/tracker-backup.log)"
+"$BACKUP_JOB" || echo "    (backup reported a problem; see /var/log/$NAME-backup.log)"
 
 echo
-echo "Gift Tracker is running on 127.0.0.1:$PORT (loopback only)."
+echo "Gift Tracker${LABEL:-} is running on 127.0.0.1:$PORT (loopback only)."
 [ -n "${ADDED:-}" ] && echo "Settings added to $CONF:$ADDED"
 if [ -z "$(conf_val ALLOWED_EMAILS)" ] || [ -z "$(conf_val CF_AUD)" ] || [ -z "$(conf_val CF_TEAM_DOMAIN)" ]; then
-  echo "Not usable yet: set ALLOWED_EMAILS, USERS, CF_TEAM_DOMAIN and CF_AUD in $CONF, then: rc-service tracker restart"
+  echo "Not usable yet: set ALLOWED_EMAILS, USERS, CF_TEAM_DOMAIN and CF_AUD in $CONF, then: rc-service $NAME restart"
 fi
 echo "Point the Cloudflare Tunnel at http://127.0.0.1:$PORT (cloudflared in this container)."
 exit 0
