@@ -265,3 +265,7 @@ button.row { width: 100%; text-align: left; cursor: pointer; font: inherit; colo
 /* agent tokens and the notes they leave on a gift */
 code.token { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; word-break: break-all; user-select: all; }
 .agent-log { margin: .25rem 0 0; padding-left: 1.1rem; }
+
+/* gift exchanges */
+.exchange details { margin-top: 6px; }
+.exchange summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
