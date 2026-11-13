@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+import boards
 import budgets
 import db as database
 import gifts
@@ -340,6 +341,23 @@ def person_history(person_id):
 @app.get("/api/occasions/<int:occasion_id>/summary")
 def occasion_summary(occasion_id):
     return jsonify(budgets.summary(db(), occasion_id, unlocked=unlocked()))
+
+
+# -- a protected person's board
+@app.get("/api/occasions/<int:occasion_id>/board/<int:person_id>")
+@unlock_required
+def person_board(occasion_id, person_id):
+    return jsonify(boards.board(db(), occasion_id, person_id))
+
+
+@app.post("/api/gifts/<int:gift_id>/assign")
+@unlock_required
+def gifts_assign(gift_id):
+    """{giver_ids, expected_giver_ids}: 409 when the givers are no longer the ones the caller saw."""
+    visible_gift(gift_id)
+    giver_ids, expected = boards.parse_assign(json_body())
+    boards.assign(db(), gift_id, giver_ids, expected)
+    return jsonify(gift_json(visible_gift(gift_id)))
 
 
 init_db()
