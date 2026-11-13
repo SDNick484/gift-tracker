@@ -7,6 +7,7 @@ import { ApiError, events, get, send } from "../static/js/api.js";
 import { backTarget, forChoices, fromChoices, render as renderIdeaScreen } from "../static/js/idea.js";
 import { findEntry, giftLine, groupByOccasion, renderPage, totalsText } from "../static/js/person.js";
 import { buildPatch, canSanta, pickList, renderPage as renderGiftPage, renderSteps, stepClass } from "../static/js/gift.js";
+import { assignBody, assignChoices, countGifts, evennessLine, renderBoard, splitLine } from "../static/js/board.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
@@ -298,4 +299,66 @@ test("gift: page escapes everything typed and only offers Santa when the flag is
   const locked = fullGift(); delete locked.santa;
   assert.ok(!renderGiftPage(locked, people4, "X", false).includes('id="santa"'));
   assert.ok(renderGiftPage(fullGift({ giver_ids: [3], track: "theirs", status: "told", told_at: "2026-11-20" }), people4, "X", true).includes("Told 2026-11-20"));
+});
+
+// ---------------------------------------------------------------- board.js
+const ppl5 = [
+  { id: 1, name: "Alex", is_user: true, active: true }, { id: 2, name: "Sam", is_user: true, active: true },
+  { id: 3, name: "Pat", active: true }, { id: 4, name: "Lee", active: true },
+  { id: 7, name: "Riley", active: true, protected: true }, { id: 8, name: "Skyler", active: true, protected: true },
+];
+const households = [
+  { label: "Us", person_ids: [1, 2] }, { label: "Pat & Lee", person_ids: [3, 4] },
+  { label: "Riley", person_ids: [7] }, { label: "Skyler & Riley", person_ids: [7, 8] },
+];
+
+test("board: the Assign menu is the households (not ones of only protected people) plus each owner alone", () => {
+  assert.deepEqual(assignChoices(households, ppl5), [
+    { value: "1,2", label: "Us" }, { value: "3,4", label: "Pat & Lee" }, { value: "1", label: "Alex only" }, { value: "2", label: "Sam only" }]);
+  const solo = [...households, { label: "Alex", person_ids: [1] }];
+  assert.equal(assignChoices(solo, ppl5).filter(c => c.value === "1").length, 1, "an owner is not offered twice");
+});
+
+test("board: assigning sends the givers the user saw as expected_giver_ids, and 'none' unassigns", () => {
+  assert.deepEqual(assignBody({ giver_ids: [] }, "3,4"), { giver_ids: [3, 4], expected_giver_ids: [] });
+  assert.deepEqual(assignBody({ giver_ids: [1, 2] }, "none"), { giver_ids: [], expected_giver_ids: [1, 2] });
+  assert.deepEqual(assignBody({ giver_ids: [3, 4] }, "2"), { giver_ids: [2], expected_giver_ids: [3, 4] });
+});
+
+const bgift = (over = {}) => ({ id: 20, title: "Puzzle", status: "idea", track: "ours", price_cents: 2500, store: null, told_at: null, giver_ids: [], santa: false, ...over });
+const board = (over = {}) => ({
+  person: { id: 7, name: "Riley", color: "#b3263e" }, unassigned: [bgift()],
+  givers: [
+    { label: "Pat & Lee", giver_ids: [3, 4], is_us: false, list_text: "Pat & Lee\n\nBook", gifts: [bgift({ id: 21, title: "Book", status: "told", track: "theirs", giver_ids: [3, 4], told_at: "2026-11-20" })] },
+    { label: "Us", giver_ids: [1, 2], is_us: true, list_text: "Us\n\nBelt", gifts: [bgift({ id: 22, title: "Belt", giver_ids: [1, 2], santa: true, status: "wrapped" })] },
+  ],
+  split: { santa: 1, us: 0, others: 1 }, evenness: [{ person_id: 7, name: "Riley", cents: 6300 }, { person_id: 8, name: "Skyler", cents: 5800 }], ...over,
+});
+
+test("board: counts and the split and evenness lines", () => {
+  assert.deepEqual(countGifts(board()), { total: 3, unassigned: 1 });
+  assert.equal(splitLine({ santa: 1, us: 2, others: 3 }), "Split: 1 Santa · 2 from us · 3 from others");
+  assert.equal(evennessLine(board().evenness), "Side by side: Riley $63.00 · Skyler $58.00");
+  assert.equal(evennessLine([]), "");
+});
+
+test("board: markup has Assign on every gift, told/confirmed buttons on theirs, Santa and no Copy on ours", () => {
+  const html = renderBoard(board(), "Christmas", assignChoices(households, ppl5));
+  assert.equal((html.match(/class="assign"/g) ?? []).length, 3);
+  assert.ok(html.includes('data-copy="0"') && !html.includes('data-copy="1"'));
+  assert.ok(html.includes('data-gift="21" data-status="told" aria-pressed="true"') && html.includes('data-status="confirmed"'));
+  assert.equal((html.match(/data-santa=/g) ?? []).length, 1);
+  assert.ok(html.includes('data-santa="22" checked'));
+  assert.ok(html.includes("3 gifts · 1 unassigned") && html.includes('data-color="#b3263e"') && html.includes("told 2026-11-20"));
+  assert.ok(/<option value="none">Unassign<\/option>/.test(html), "an assigned gift can be unassigned");
+});
+
+test("board: no Santa checkbox without the flag, and typed text is escaped", () => {
+  const b = board();
+  delete b.givers[1].gifts[0].santa;
+  b.unassigned[0].title = `<img src=x onerror=1>`;
+  b.givers[0].label = `<b>Pat</b>`;
+  const html = renderBoard(b, "<i>X</i>", [{ value: "9", label: `<script>` }]);
+  assert.ok(!html.includes("data-santa"));
+  assert.ok(!/<img|<b>|<i>|<script/.test(html), html);
 });
