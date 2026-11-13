@@ -14,7 +14,7 @@ DEV_EMAIL=alex@example.com ALLOWED_EMAILS=alex@example.com,sam@example.com \
   USERS="alex@example.com=Alex,sam@example.com=Sam" .venv/bin/python app.py
 ```
 
-`DEV_EMAIL` admits requests from loopback that carry no Cloudflare headers, as that user. It is for development only and is never set on the server. Settings are documented at the top of `settings.py`.
+`DEV_EMAIL` admits requests from loopback that carry no Cloudflare headers, as that user. It is for development only and is never set on the server. Settings are documented at the top of `settings.py`. Add `MODE=school` (and a separate `DATA_DIR`) to try the school instance described under Deployment.
 
 The frontend is plain ES modules in `static/js/` served as they are: no build step, no npm. Open `http://127.0.0.1:8767/` (with `DEV_EMAIL` set, from the same machine) to use it; the screens are hash routes (`#/`, `#/idea`, `#/person/<id>`, `#/gift/<id>`, `#/board/<id>`, `#/settings`).
 
@@ -64,6 +64,40 @@ Gunicorn runs as the unprivileged `tracker` user under OpenRC (`rc-service track
 Run `cloudflared` in the same container, so the origin is `http://127.0.0.1:8767` and nothing has to listen on a LAN address. Point the public hostname `tracker.example.com` at `http://127.0.0.1:8767`. Do not run the tunnel in another container or on another host: that would need the app to listen beyond loopback, which the installer never does.
 
 Check from another machine on the LAN that `http://<container-ip>:8767` is refused at the socket, and that a third email is refused by Access.
+
+### A second instance: school
+
+`MODE=school` turns an instance into the staff-gift tracker: staff with a role (homeroom, assistant, special subject, administrator, or anything you type), gifts with many recipients, a detail and a done tick for each recipient, and a staff-by-gift grid as the home screen. It is the same code with its own database, hostname and Access policy, so a staff list never sits beside the children's boards. In school mode there is no PIN or idle lock, no Santa, no protected people and no boards; the API answers 404 for those routes. It is not for collecting money or gifts from other families.
+
+Install it beside the family instance, in the same container or another one. A named instance gets its own service, user, folders, config, log, backup job and port, all called `tracker-<name>`; an install with no name is exactly the one above.
+
+```sh
+cp deploy/deploy.env.example deploy/school.env   # git-ignored; vim deploy/school.env
+# set MODE=school, ALLOWED_EMAILS, USERS, APP_NAME, and the CF_AUD of the school's own Access application
+DEPLOY_ENV=deploy/school.env sh installer/build.sh
+# copy dist/setup-tracker.sh into the container, then in it:
+sh setup-tracker.sh --instance school             # or TRACKER_INSTANCE=school
+```
+
+The family build bakes the family's `CF_AUD` and emails in, so do not reuse its `dist/setup-tracker.sh` for the school without overriding them: `MODE=school ALLOWED_EMAILS=... CF_AUD=... TRACKER_PORT=8768 sh setup-tracker.sh --instance school` does it from the command line. The settings are written to `/etc/conf.d/tracker-school` on the first install only, and never overwritten. The default port for a named instance is 8768 (an existing install keeps its own); the installer refuses a port that is taken.
+
+| | Family (no name) | `--instance school` |
+| --- | --- | --- |
+| Service | `tracker` | `tracker-school` |
+| App, data, backups | `/opt/tracker`, `/var/lib/tracker`, `/var/backups/tracker` | the same with `tracker-school` |
+| Config, log | `/etc/conf.d/tracker`, `/var/log/tracker.log` | `/etc/conf.d/tracker-school`, `/var/log/tracker-school.log` |
+| Daily backup job | `/etc/periodic/daily/tracker-backup` | `/etc/periodic/daily/tracker-school-backup` |
+| Port | 8767 | 8768 |
+
+```sh
+rc-service tracker-school restart
+tail -n 40 /var/log/tracker-school.log
+sh setup-tracker.sh --instance school --uninstall    # keeps its data, config and backups
+```
+
+Cloudflare, as for the family instance but on its own: a separate Access application for `school.example.com` whose one Allow policy lists only the people who plan the school gifts, its AUD tag in `CF_AUD` in `/etc/conf.d/tracker-school`, and a second public hostname on the existing tunnel pointing at `http://127.0.0.1:8768`. Do not add these people to the family application, and do not point both hostnames at one port.
+
+Using it: add each staff member in Settings with a role; everyone active appears in the grid (set a person's plan to skip in an occasion to leave them out, or make them inactive when they leave). Start each occasion ("Christmas 2026", "End of year 2027") from the previous one to carry plans and budgets forward. Add a gift (a title and who it is for: everyone with a role, or one person), then tap grid cells to add or remove people. Tap a filled cell to set its detail ("$35 · coffee shop") and tick it done; a column header has "Add role" to add everyone with that role, and shows how many people the gift is for and how many are done. A gift always keeps one recipient: to drop the last one, delete the gift.
 
 ### Backups
 
