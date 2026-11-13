@@ -369,10 +369,28 @@ def refuse_locked_write(data: dict) -> None:
         raise locked()
 
 
+def refuse_locked_exchange_write(data: dict, gift_id: int | None = None) -> None:
+    """While locked, a gift that is (or, with this body, would be) the gift for an exchange draw may not have a
+    protected giver: its draw would be protected data. 423, as for a protected recipient. Checked before the
+    exchange itself is looked at, so the answer tells nothing about which draws exist."""
+    if is_school() or unlocked():
+        return
+    old = gifts.get(db(), gift_id) if gift_id is not None else None
+    link = data["exchange_id"] if "exchange_id" in data else (old["exchange_id"] if old else None)
+    if link is None or isinstance(link, bool) or not isinstance(link, int):
+        return
+    givers = data.get("giver_ids")
+    if not isinstance(givers, list):
+        givers = [r[0] for r in db().execute("SELECT person_id FROM gift_givers WHERE gift_id = ?", (gift_id,))] if old else []
+    if people.protected_ids(db()) & {i for i in givers if isinstance(i, int) and not isinstance(i, bool)}:
+        raise locked()
+
+
 @app.post("/api/gifts")
 def gifts_create():
     data = json_body()
     refuse_locked_write(data)
+    refuse_locked_exchange_write(data)
     gid = gifts.create(db(), g.user, data)
     return jsonify(gift_json(visible_gift(gid))), 201
 
@@ -387,6 +405,7 @@ def gifts_update(gift_id):
     visible_gift(gift_id)
     data = json_body()
     refuse_locked_write(data)
+    refuse_locked_exchange_write(data, gift_id)
     gifts.update(db(), gift_id, data, actor=g.user["name"])
     return jsonify(gift_json(visible_gift(gift_id)))
 

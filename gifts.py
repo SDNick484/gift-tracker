@@ -10,6 +10,7 @@ A gift's track follows its givers. It is "ours" when no giver is set or an owner
 "theirs" when only other people give it. Money is integer cents (common.parse_cents)."""
 import common
 import db
+import exchanges
 import locations
 import occasions
 import orders
@@ -74,7 +75,8 @@ def to_json(con, row, *, unlocked: bool) -> dict:
            "price_cents": row["price_cents"], "notes": row["notes"], "recipient_ids": recipients,
            "giver_ids": givers, "told_at": row["told_at"], "created_by": row["created_by"],
            "updated_at": row["updated_at"], **orders.to_json(con, row), "location_id": row["location_id"],
-           "location_path": locations.path_map(con).get(row["location_id"]) if row["location_id"] else None}
+           "location_path": locations.path_map(con).get(row["location_id"]) if row["location_id"] else None,
+           "exchange_id": row["exchange_id"]}
     if unlocked:
         out["santa"] = bool(row["santa"])
     return out
@@ -164,6 +166,7 @@ def create(con, user: dict, data: dict) -> int:
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
     santa = bool(flag(data, "santa", False))
     _check_santa(santa, set(givers), user_ids)
+    exchange_id = exchanges.exchange_id_of(con, data) if "exchange_id" in data else None
     now = common.now()
     with db.transaction(con):
         gid = con.execute(
@@ -173,12 +176,15 @@ def create(con, user: dict, data: dict) -> int:
              f.get("notes"), common.today() if trk == "theirs" else None, user["email"], now, now)).lastrowid
         con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)", [(gid, p) for p in recipients])
         con.executemany("INSERT INTO gift_givers (gift_id, person_id) VALUES (?, ?)", [(gid, p) for p in givers])
+        if exchange_id is not None:
+            con.execute("UPDATE gifts SET exchange_id = ? WHERE id = ?", (exchange_id, gid))
+            exchanges.check_gift(con, gid)  # 400 / 409 roll the gift back
     return gid
 
 
 def update(con, gift_id: int, data: dict, actor: str | None = None) -> None:
     """Change title, url, store, price, notes, recipients, givers, Santa, the order fields (orders.FIELDS), the
-    hiding place (location_id) or the status. A changed giver list can change the track, with the consequences
+    hiding place (location_id), the exchange it is a gift for (exchange_id) or the status. A changed giver list can change the track, with the consequences
     set_givers describes; Santa is checked against the result; a status goes through the same rules as
     set_status, ordered included. All of it applies or none of it."""
     _row(con, gift_id)
@@ -192,6 +198,8 @@ def update(con, gift_id: int, data: dict, actor: str | None = None) -> None:
         raise ApiError(400, "A gift needs at least one recipient.")
     givers = _person_ids(con, data, "giver_ids")
     santa = flag(data, "santa")
+    if "exchange_id" in data:
+        f["exchange_id"] = exchanges.exchange_id_of(con, data)
     with db.transaction(con):
         if givers is not None:
             _set_givers(con, gift_id, givers)
@@ -213,6 +221,7 @@ def update(con, gift_id: int, data: dict, actor: str | None = None) -> None:
             _apply_status(con, gift_id, status, data, actor)  # writes the order fields too
         else:
             orders.write(con, gift_id, order)
+        exchanges.check_gift(con, gift_id)  # the link, new or old, must still be a draw
 
 
 def set_status(con, gift_id: int, status: str, order: dict | None = None, actor: str | None = None) -> None:

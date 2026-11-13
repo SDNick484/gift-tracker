@@ -186,3 +186,39 @@ def remove_draw(con, exchange_id: int, drawer_id: int, *, unlocked: bool) -> dic
             raise ApiError(409, "This draw has a gift. Delete or unlink it first.")
         con.execute("DELETE FROM exchange_draws WHERE exchange_id = ? AND drawer_id = ?", (exchange_id, drawer_id))
     return one(con, exchange_id, unlocked=unlocked)
+
+
+# ---------------------------------------------------------------- the gift for a draw
+def exchange_id_of(con, data: dict):
+    """data["exchange_id"] (the key must be present): null unlinks, the id of an existing exchange links; else 400."""
+    value = data["exchange_id"]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ApiError(400, "exchange_id must be a whole number or null.")
+    if not con.execute("SELECT 1 FROM exchanges WHERE id = ?", (value,)).fetchone():
+        raise ApiError(400, "No such exchange.")
+    return value
+
+
+def check_gift(con, gift_id: int) -> None:
+    """The gift's link to an exchange, if it has one, must be a draw: the exchange is in the gift's own occasion,
+    the gift has exactly one giver and one recipient, and that pair is one of the exchange's draws (400), and no
+    other gift is linked to the same draw (409). Run inside the writer's transaction, after the people are stored,
+    so an error rolls the whole write back."""
+    gift = con.execute("SELECT occasion_id, exchange_id FROM gifts WHERE id = ?", (gift_id,)).fetchone()
+    if gift["exchange_id"] is None:
+        return
+    ex = con.execute("SELECT occasion_id FROM exchanges WHERE id = ?", (gift["exchange_id"],)).fetchone()
+    if ex is None:
+        raise ApiError(400, "No such exchange.")
+    if ex["occasion_id"] != gift["occasion_id"]:
+        raise ApiError(400, "That exchange belongs to another occasion.")
+    givers = [r[0] for r in con.execute("SELECT person_id FROM gift_givers WHERE gift_id = ?", (gift_id,))]
+    recipients = [r[0] for r in con.execute("SELECT person_id FROM gift_recipients WHERE gift_id = ?", (gift_id,))]
+    draw = _draw(con, gift["exchange_id"], givers[0]) if len(givers) == 1 else None
+    if len(givers) != 1 or len(recipients) != 1 or draw is None or draw["recipient_id"] != recipients[0]:
+        raise ApiError(400, "A gift for an exchange has the drawer as its one giver and the person drawn as its one recipient.")
+    if con.execute("SELECT 1 FROM gifts g JOIN gift_givers gg ON gg.gift_id = g.id AND gg.person_id = ? "
+                   "WHERE g.exchange_id = ? AND g.id != ?", (givers[0], gift["exchange_id"], gift_id)).fetchone():
+        raise ApiError(409, "This draw already has a gift.")
