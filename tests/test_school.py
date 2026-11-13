@@ -16,6 +16,7 @@ from test_privacy import api_rules, urls
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAMILY_ONLY = {"lock_set_pin", "lock_unlock", "lock_lock", "person_board", "gifts_assign"}
+SCHOOL_ONLY = {"school_matrix", "school_cell_set", "school_cell_remove", "school_role_add"}
 
 
 @pytest.fixture
@@ -25,9 +26,9 @@ def school(monkeypatch):
 
 @pytest.fixture
 def staff(client, school):
-    """One occasion and five staff, all in it with a plan; plus four gifts (columns) with no recipients yet:
-    their ids are in `gift` (creating them needs a recipient, so each starts with `avery` and the test removes her
-    only if it needs an empty column)."""
+    """Christmas 2025 with five staff (all in it, plan individual) and four gifts, each created with its first
+    recipient (a gift needs one): Card $35 for Ms. Avery, Card $25 for Ms. Chen, Apprec. for Ms. Blake and Granola
+    for Mr. Diaz. Ms. Ellis has no gift."""
     o = mk_occasion(client, "Christmas 2025", date="2025-12-19")
     out = {"o": o}
     for key, name, role in (("avery", "Ms. Avery", "homeroom"), ("blake", "Ms. Blake", "homeroom"),
@@ -35,9 +36,10 @@ def staff(client, school):
                             ("ellis", "Ms. Ellis", "administrator")):
         out[key] = mk_person(client, name, role=role)
         put_plan(client, o, out[key])
-    out["gift"] = {}
-    for key, title in (("card35", "Card $35"), ("card25", "Card $25"), ("apprec", "Apprec."), ("granola", "Granola")):
-        out["gift"][key] = mk_gift(client, o, title, to=[out["ellis"]])
+    out["card35"] = mk_gift(client, o, "Card $35", to=[out["avery"]])
+    out["card25"] = mk_gift(client, o, "Card $25", to=[out["chen"]])
+    out["apprec"] = mk_gift(client, o, "Apprec.", to=[out["blake"]])
+    out["granola"] = mk_gift(client, o, "Granola", to=[out["diaz"]])
     return types.SimpleNamespace(**out)
 
 
@@ -77,14 +79,22 @@ def sweep(client, rules, ids, missing):
 
 
 # ---------------------------------------------------------------- the mode switch
-def test_the_family_only_views_are_exactly_these():
+def test_the_family_only_and_school_only_views_are_exactly_these():
     assert {r.endpoint for r in rules_with("family")} == FAMILY_ONLY
+    assert {r.endpoint for r in rules_with("school")} == SCHOOL_ONLY
 
 
 def test_every_family_only_route_is_404_in_school_mode(client, ids, school):
     missing = client.get("/api/nothing-here", headers=mut())
     assert missing.status_code == 404
     assert sweep(client, rules_with("family"), ids, missing) >= 5
+
+
+def test_every_school_route_is_404_in_family_mode(client, ids):
+    missing = client.get("/api/nothing-here", headers=mut())
+    assert sweep(client, rules_with("school"), ids, missing) >= 4
+    # and the data is untouched
+    assert con_rows("SELECT COUNT(*) FROM gift_recipients") == [(0,)]
 
 
 def test_family_routes_still_work_in_family_mode(client, ids, unlock):
@@ -225,3 +235,252 @@ def test_editing_recipients_keeps_detail_and_done_of_those_who_stay(client, scho
     client.patch(f"/api/gifts/{g}", json={"title": "Gift cards"}, headers=mut())
     assert con_rows("SELECT person_id, detail, done FROM gift_recipients WHERE gift_id = ? ORDER BY person_id", g) == \
         [(avery, "$35 · coffee shop", 1), (chen, None, 0)]
+
+
+# ---------------------------------------------------------------- the matrix
+def matrix(client, o):
+    r = client.get(f"/api/occasions/{o}/matrix", headers=auth())
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()
+
+
+def cell(client, gid, pid, body=None, method="PUT", **kw):
+    return client.open(f"/api/gifts/{gid}/recipients/{pid}", method=method, json={} if body is None else body, headers=mut(), **kw)
+
+
+def test_matrix_shape_counts_and_order(client, staff):
+    s = staff
+    assert cell(client, s.card35, s.avery, {"detail": "$35 · coffee shop", "done": True}).status_code == 200
+    assert cell(client, s.card35, s.blake).status_code == 201
+    assert cell(client, s.apprec, s.avery, {"detail": "card"}).status_code == 201
+    m = matrix(client, s.o)
+    assert m["occasion"] == {"id": s.o, "name": "Christmas 2025", "kind": "christmas", "date": "2025-12-19", "archived": False}
+    assert [g["title"] for g in m["gifts"]] == ["Card $35", "Card $25", "Apprec.", "Granola"]
+    assert m["gifts"][0] == {"id": s.card35, "title": "Card $35", "status": "idea", "recipient_count": 2, "done_count": 1}
+    assert [(g["recipient_count"], g["done_count"]) for g in m["gifts"]] == [(2, 1), (1, 0), (2, 0), (1, 0)]
+    assert [x["name"] for x in m["staff"]] == ["Ms. Avery", "Ms. Blake", "Ms. Chen", "Mr. Diaz", "Ms. Ellis"]
+    assert m["staff"][0] == {"id": s.avery, "name": "Ms. Avery", "role": "homeroom", "color": None, "active": True, "plan": "individual"}
+    assert m["cells"] == [
+        {"gift_id": s.card35, "person_id": s.avery, "detail": "$35 · coffee shop", "done": True},
+        {"gift_id": s.card35, "person_id": s.blake, "detail": None, "done": False},
+        {"gift_id": s.card25, "person_id": s.chen, "detail": None, "done": False},
+        {"gift_id": s.apprec, "person_id": s.avery, "detail": "card", "done": False},
+        {"gift_id": s.apprec, "person_id": s.blake, "detail": None, "done": False},
+        {"gift_id": s.granola, "person_id": s.diaz, "detail": None, "done": False},
+    ]
+    assert list(m) == ["occasion", "gifts", "staff", "cells"]
+
+
+def test_rows_are_the_occasions_people_and_every_recipient_but_not_skipped_people(client, staff):
+    s = staff
+    put_plan(client, s.o, s.ellis, plan="skip")                      # in the occasion but skipped: no row
+    outsider = mk_person(client, "Ms. Fox", role="homeroom")         # not in the occasion, no gift: no row
+    receiver = mk_person(client, "Mr. Grant", role="assistant")      # no plan, but a recipient: a row
+    put_plan(client, s.o, s.diaz, plan="skip")                       # skipped but has a gift: still a row
+    assert cell(client, s.card25, receiver).status_code == 201
+    m = matrix(client, s.o)
+    names = [x["name"] for x in m["staff"]]
+    assert "Ms. Ellis" not in names and "Ms. Fox" not in names
+    assert {"Ms. Avery", "Ms. Blake", "Ms. Chen", "Mr. Diaz", "Mr. Grant"} == set(names)
+    assert next(x for x in m["staff"] if x["id"] == receiver)["plan"] is None
+    assert next(x for x in m["staff"] if x["id"] == s.diaz)["plan"] == "skip"
+    assert outsider not in [x["id"] for x in m["staff"]]
+
+
+def test_an_inactive_person_in_the_occasion_is_still_a_row_and_marked_inactive(client, staff):
+    s = staff
+    client.patch(f"/api/people/{s.ellis}", json={"active": False}, headers=mut())
+    row = next(x for x in matrix(client, s.o)["staff"] if x["id"] == s.ellis)
+    assert row["active"] is False
+
+
+def test_a_new_occasion_starts_from_the_previous_staff_list(client, staff):
+    s = staff
+    new = mk_occasion(client, "End of year 2026", kind="other", date="2026-06-05", copy_from=s.o)
+    m = matrix(client, new)
+    assert [x["name"] for x in m["staff"]] == ["Ms. Avery", "Ms. Blake", "Ms. Chen", "Mr. Diaz", "Ms. Ellis"]
+    assert m["gifts"] == [] and m["cells"] == []
+    assert [x["role"] for x in m["staff"]] == ["homeroom", "homeroom", "assistant", "special subject", "administrator"]
+
+
+def test_columns_and_cells_belong_to_their_own_occasion(client, staff):
+    s = staff
+    other = mk_occasion(client, "Teacher Appreciation", kind="other", date="2026-05-05")
+    g = mk_gift(client, other, "Flowers", to=[s.avery])
+    m = matrix(client, s.o)
+    assert g not in [x["id"] for x in m["gifts"]] and all(c["gift_id"] != g for c in m["cells"])
+    assert [x["id"] for x in matrix(client, other)["gifts"]] == [g]
+
+
+def test_matrix_for_a_missing_occasion_is_404(client, staff):
+    r = client.get("/api/occasions/99999/matrix", headers=auth())
+    assert (r.status_code, r.get_json()) == (404, {"error": "No such occasion."})
+
+
+# ---------------------------------------------------------------- one cell
+def test_put_adds_then_updates_and_changes_only_the_keys_sent(client, staff):
+    s = staff
+    r = cell(client, s.card35, s.blake)
+    assert (r.status_code, r.get_json()) == (201, {"gift_id": s.card35, "person_id": s.blake, "detail": None, "done": False,
+                                                    "recipient_count": 2, "done_count": 0})
+    r = cell(client, s.card35, s.blake, {"done": True})
+    assert (r.status_code, r.get_json()["done"], r.get_json()["done_count"]) == (200, True, 1)
+    r = cell(client, s.card35, s.blake, {"detail": "  $35 · bookstore "})
+    assert (r.get_json()["detail"], r.get_json()["done"]) == ("$35 · bookstore", True)
+    r = cell(client, s.card35, s.blake, {"done": False})
+    assert (r.get_json()["detail"], r.get_json()["done"], r.get_json()["done_count"]) == ("$35 · bookstore", False, 0)
+    r = cell(client, s.card35, s.blake, {"detail": None})
+    assert r.get_json()["detail"] is None
+    assert cell(client, s.card35, s.blake, {"detail": ""}).get_json()["detail"] is None
+    assert cell(client, s.card35, s.blake, {"done": None}).get_json()["done"] is False     # null means "not sent"
+    assert con_rows("SELECT COUNT(*) FROM gift_recipients WHERE gift_id = ?", s.card35) == [(2,)]
+
+
+def test_put_with_a_detail_on_a_new_cell_creates_it_with_that_detail(client, staff):
+    s = staff
+    r = cell(client, s.card25, s.ellis, {"detail": "$25 · tea", "done": True})
+    assert (r.status_code, r.get_json()["detail"], r.get_json()["done"], r.get_json()["recipient_count"]) == (201, "$25 · tea", True, 2)
+
+
+def test_a_cell_change_moves_the_gifts_updated_at(client, staff, clock):
+    s = staff
+    clock.advance(60)
+    cell(client, s.card35, s.blake)
+    assert con_rows("SELECT updated_at FROM gifts WHERE id = ?", s.card35) == [(clock.t,)]
+    clock.advance(60)
+    cell(client, s.card35, s.blake, method="DELETE")
+    assert con_rows("SELECT updated_at FROM gifts WHERE id = ?", s.card35) == [(clock.t,)]
+
+
+@pytest.mark.parametrize("body", [{"done": "yes"}, {"done": 1}, {"done": 0}, {"detail": 5}, {"detail": ["x"]}, {"detail": "x" * 201}])
+def test_put_rejects_bad_values_and_stores_nothing(client, staff, body):
+    s = staff
+    assert cell(client, s.card35, s.avery, body).status_code == 400
+    assert cell(client, s.card35, s.blake, body).status_code == 400
+    assert con_rows("SELECT person_id, detail, done FROM gift_recipients WHERE gift_id = ?", s.card35) == [(s.avery, None, 0)]
+
+
+def test_put_needs_a_json_object(client, staff):
+    s = staff
+    r = client.put(f"/api/gifts/{s.card35}/recipients/{s.blake}", data="[1]", headers=mut())
+    assert r.status_code == 400
+
+
+def test_put_a_missing_person_or_gift_is_404(client, staff):
+    s = staff
+    assert cell(client, s.card35, 99999).status_code == 404
+    assert cell(client, 99999, s.avery).status_code == 404
+    assert cell(client, 99999, 99999).status_code == 404
+
+
+def test_delete_removes_a_cell_and_refuses_the_last_one(client, staff):
+    s = staff
+    cell(client, s.card35, s.blake, {"done": True})
+    r = cell(client, s.card35, s.blake, method="DELETE")
+    assert (r.status_code, r.get_json()) == (200, {"gift_id": s.card35, "person_id": s.blake, "recipient_count": 1, "done_count": 0})
+    r = cell(client, s.card35, s.avery, method="DELETE")
+    assert (r.status_code, r.get_json()) == (409, {"error": "A gift needs at least one recipient. Delete the gift instead."})
+    assert con_rows("SELECT person_id FROM gift_recipients WHERE gift_id = ?", s.card35) == [(s.avery,)]
+    r = cell(client, s.card35, s.blake, method="DELETE")                     # no longer a recipient
+    assert (r.status_code, r.get_json()) == (404, {"error": "That person is not a recipient of this gift."})
+    assert cell(client, 99999, s.avery, method="DELETE").status_code == 404
+
+
+def test_removing_and_adding_back_starts_the_cell_afresh(client, staff):
+    s = staff
+    cell(client, s.card35, s.blake, {"detail": "x", "done": True})
+    cell(client, s.card35, s.blake, method="DELETE")
+    r = cell(client, s.card35, s.blake)
+    assert (r.status_code, r.get_json()["detail"], r.get_json()["done"]) == (201, None, False)
+
+
+def test_deleting_a_gift_removes_its_column_and_cells(client, staff):
+    s = staff
+    cell(client, s.card35, s.blake, {"done": True})
+    assert client.delete(f"/api/gifts/{s.card35}", headers=mut()).status_code == 200
+    m = matrix(client, s.o)
+    assert s.card35 not in [g["id"] for g in m["gifts"]] and all(c["gift_id"] != s.card35 for c in m["cells"])
+    assert con_rows("SELECT COUNT(*) FROM gift_recipients WHERE gift_id = ?", s.card35) == [(0,)]
+
+
+# ---------------------------------------------------------------- add everyone with a role
+def test_add_everyone_with_a_role(client, staff):
+    s = staff
+    cell(client, s.card35, s.blake, {"detail": "kept", "done": True})
+    r = client.post(f"/api/gifts/{s.card35}/recipients", json={"role": " Homeroom "}, headers=mut())
+    assert (r.status_code, r.get_json()) == (200, {"added": [], "recipient_count": 2, "done_count": 1})   # both already there
+    r = client.post(f"/api/gifts/{s.card25}/recipients", json={"role": "HOMEROOM"}, headers=mut())
+    assert (r.status_code, r.get_json()) == (200, {"added": [s.avery, s.blake], "recipient_count": 3, "done_count": 0})
+    r = client.post(f"/api/gifts/{s.card25}/recipients", json={"role": "homeroom"}, headers=mut())
+    assert r.get_json()["added"] == []
+    assert con_rows("SELECT detail, done FROM gift_recipients WHERE gift_id = ? AND person_id = ?", s.card35, s.blake) == [("kept", 1)]
+    assert con_rows("SELECT detail, done FROM gift_recipients WHERE gift_id = ? AND person_id = ?", s.card25, s.avery) == [(None, 0)]
+
+
+def test_add_role_skips_inactive_people_and_unknown_roles_add_nobody(client, staff):
+    s = staff
+    extra = mk_person(client, "Ms. Hall", role="homeroom")
+    client.patch(f"/api/people/{extra}", json={"active": False}, headers=mut())
+    r = client.post(f"/api/gifts/{s.granola}/recipients", json={"role": "homeroom"}, headers=mut())
+    assert r.get_json()["added"] == [s.avery, s.blake]
+    r = client.post(f"/api/gifts/{s.granola}/recipients", json={"role": "bus driver"}, headers=mut())
+    assert (r.status_code, r.get_json()["added"]) == (200, [])
+
+
+@pytest.mark.parametrize("body", [{}, {"role": ""}, {"role": "   "}, {"role": 3}, {"role": None}, {"role": ["homeroom"]}, {"role": "x" * 51}])
+def test_add_role_needs_a_role(client, staff, body):
+    s = staff
+    assert client.post(f"/api/gifts/{s.granola}/recipients", json=body, headers=mut()).status_code == 400
+    assert con_rows("SELECT COUNT(*) FROM gift_recipients WHERE gift_id = ?", s.granola) == [(1,)]
+
+
+def test_add_role_to_a_missing_gift_is_404(client, staff):
+    assert client.post("/api/gifts/99999/recipients", json={"role": "homeroom"}, headers=mut()).status_code == 404
+
+
+# ---------------------------------------------------------------- editing a gift through the routes keeps details
+def test_patching_recipients_after_setting_cells_keeps_them(client, staff):
+    s = staff
+    cell(client, s.card35, s.blake, {"detail": "$35", "done": True})
+    r = client.patch(f"/api/gifts/{s.card35}", json={"recipient_ids": [s.avery, s.blake, s.chen]}, headers=mut())
+    assert r.status_code == 200
+    m = matrix(client, s.o)
+    assert {"gift_id": s.card35, "person_id": s.blake, "detail": "$35", "done": True} in m["cells"]
+    assert next(g for g in m["gifts"] if g["id"] == s.card35)["recipient_count"] == 3
+
+
+# ---------------------------------------------------------------- the guards still apply
+def test_school_writes_need_the_csrf_headers_and_identity(client, staff):
+    s = staff
+    path = f"/api/gifts/{s.card35}/recipients/{s.blake}"
+    assert client.put(path, json={}, headers=auth()).status_code == 400
+    assert client.delete(path, headers=auth()).status_code == 400
+    assert client.post(f"/api/gifts/{s.card35}/recipients", json={"role": "homeroom"}, headers=auth()).status_code == 400
+    lan = {"environ_base": {"REMOTE_ADDR": "192.0.2.50"}}
+    assert client.get(f"/api/occasions/{s.o}/matrix", **lan).status_code == 403
+    assert client.put(path, json={}, **lan).status_code == 403
+    assert con_rows("SELECT COUNT(*) FROM gift_recipients WHERE gift_id = ?", s.card35) == [(1,)]
+
+
+def test_the_wrong_origin_is_refused_on_a_cell_write(client, staff):
+    s = staff
+    r = client.put(f"/api/gifts/{s.card35}/recipients/{s.blake}", json={}, headers={**mut(), "Origin": "https://evil.example.com"})
+    assert r.status_code == 403
+
+
+def test_no_school_mode_request_is_a_server_error(client, ids, school):
+    """Walk every route in school mode with hostile bodies: 4xx or 2xx, never a 500 (the matrix routes included)."""
+    bodies = [{}, {"role": 5}, {"role": "homeroom"}, {"detail": ["x"]}, {"detail": "x" * 500}, {"done": "yes"}, {"done": None},
+              {"santa": True}, {"protected": True}, {"title": "x", "recipient_ids": "nope"}, {"plan": "skip", "budget_cents": -1}]
+    assert mk_gift(client, ids.o, "Card", to=[ids.jordan]) == 1      # test_privacy.args() points gift_id at 1
+    sent = 0
+    for rule in api_rules({"GET", "POST", "PUT", "PATCH", "DELETE"}):
+        if rule.rule.startswith("/api/lock"):
+            continue
+        for method in sorted(rule.methods & {"GET", "POST", "PUT", "PATCH", "DELETE"}):
+            for url, _values in urls(rule, world(ids)):
+                for body in ([None] if method == "GET" else bodies):
+                    r = client.open(url, method=method, json=body, headers=mut())
+                    sent += 1
+                    assert r.status_code < 500, (method, url, body, r.status_code, r.get_data(as_text=True)[:200])
+    assert sent > 200

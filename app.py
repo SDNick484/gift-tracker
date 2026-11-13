@@ -17,6 +17,7 @@ import identity
 import lock
 import occasions
 import people
+import school
 import settings
 from common import ApiError, is_school, json_body, locked
 
@@ -392,6 +393,37 @@ def person_history(person_id):
 @app.get("/api/occasions/<int:occasion_id>/summary")
 def occasion_summary(occasion_id):
     return jsonify(budgets.summary(db(), occasion_id, unlocked=unlocked()))
+
+
+# -- school mode: the staff-by-gift matrix. These exist only when MODE=school (school_only: 404 otherwise).
+@app.get("/api/occasions/<int:occasion_id>/matrix")
+@school_only
+def school_matrix(occasion_id):
+    return jsonify(school.matrix(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.put("/api/gifts/<int:gift_id>/recipients/<int:person_id>")
+@school_only
+def school_cell_set(gift_id, person_id):
+    """Add the person to the gift (201) or update their cell (200): {detail?, done?}."""
+    visible_gift(gift_id)
+    out, created = school.set_cell(db(), gift_id, person_id, json_body())
+    return jsonify(out), 201 if created else 200
+
+
+@app.delete("/api/gifts/<int:gift_id>/recipients/<int:person_id>")
+@school_only
+def school_cell_remove(gift_id, person_id):
+    visible_gift(gift_id)
+    return jsonify(school.remove_cell(db(), gift_id, person_id))
+
+
+@app.post("/api/gifts/<int:gift_id>/recipients")
+@school_only
+def school_role_add(gift_id):
+    """{role}: everyone with that role becomes a recipient."""
+    visible_gift(gift_id)
+    return jsonify(school.add_role(db(), gift_id, json_body()))
 
 
 # -- a protected person's board
