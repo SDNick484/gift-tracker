@@ -108,7 +108,8 @@ def test_setting_a_pin_does_not_unlock(client):
 
 def test_unlock_without_a_pin_is_409_and_the_user_stays_locked(client):
     assert unlock_status(client, "4821") == 409
-    assert me(client) == {"email": "alex@example.com", "name": "Alex", "app_name": "Ledger",
+    alex = next(p["id"] for p in client.get("/api/people", headers=auth()).get_json() if p["name"] == "Alex")
+    assert me(client) == {"email": "alex@example.com", "name": "Alex", "person_id": alex, "app_name": "Ledger",
                           "has_pin": False, "unlocked": False, "lock_idle_seconds": 300}
 
 

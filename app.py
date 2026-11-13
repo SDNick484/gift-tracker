@@ -1,6 +1,8 @@
 """Gift Tracker: Flask + SQLite. This module holds the Flask object, the request hooks and every route;
 route-free logic lives in sibling modules that take a sqlite3.Connection."""
 import functools
+import html
+import json
 import os
 from urllib.parse import urlparse
 
@@ -132,10 +134,28 @@ def healthz():
     return jsonify(ok=True)
 
 
+@app.get("/")
+def index():
+    """The single page, with APP_NAME as its title and its home-screen name (the only two places the page names
+    itself). Everything else is static/js. Read per request: the file is small and the setting is fixed per process."""
+    with open(os.path.join(app.static_folder, "index.html"), encoding="utf-8") as f:
+        page = f.read().replace("__APP_NAME__", html.escape(settings.APP_NAME, quote=True))
+    return app.response_class(page, mimetype="text/html")
+
+
+@app.get("/manifest.json")
+def manifest():
+    """static/manifest.json with name and short_name set to APP_NAME. Behind the identity guard like everything
+    else, so index.html asks for it with crossorigin="use-credentials"."""
+    with open(os.path.join(app.static_folder, "manifest.json"), encoding="utf-8") as f:
+        data = {**json.load(f), "name": settings.APP_NAME, "short_name": settings.APP_NAME}
+    return app.response_class(json.dumps(data), mimetype="application/manifest+json")
+
+
 @app.get("/api/me")
 def me():
-    return jsonify(email=g.user["email"], name=g.user["name"], app_name=settings.APP_NAME,
-                   has_pin=lock.has_pin(db(), g.user["email"]), unlocked=unlocked(),
+    return jsonify(email=g.user["email"], name=g.user["name"], person_id=people.person_id_of(db(), g.user["email"]),
+                   app_name=settings.APP_NAME, has_pin=lock.has_pin(db(), g.user["email"]), unlocked=unlocked(),
                    lock_idle_seconds=settings.LOCK_IDLE_SECONDS)
 
 

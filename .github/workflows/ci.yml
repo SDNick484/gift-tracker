@@ -33,7 +33,7 @@ jobs:
       - run: python -m pytest -q
 
   lint:
-    name: ruff and node --check
+    name: ruff, node --check and node --test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -42,12 +42,14 @@ jobs:
           python-version: "3.x"
       - run: python -m pip install "ruff==0.17.5"
       - run: ruff check
-      # The runner's own Node is enough for a syntax check. nullglob: static/js may not exist yet.
+      # The runner's own Node is enough for a syntax check and for the built-in test runner.
       - name: node --check static/js/*.js
         run: |
           shopt -s nullglob
           node --version
           for f in static/js/*.js; do node --check "$f"; done
+      - name: node --test tests/frontend.test.mjs
+        run: node --test tests/frontend.test.mjs
 
   shellcheck:
     name: shellcheck (sh)

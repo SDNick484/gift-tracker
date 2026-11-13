@@ -29,6 +29,12 @@ def user_person_ids(con) -> set[int]:
     return {r["person_id"] for r in con.execute("SELECT person_id FROM users")}
 
 
+def person_id_of(con, email: str) -> int | None:
+    """The person row of the user with this email, or None for an email that is not a seeded user."""
+    row = con.execute("SELECT person_id FROM users WHERE email = ?", (email,)).fetchone()
+    return row["person_id"] if row else None
+
+
 def protected_ids(con) -> set[int]:
     """Every protected person, active or not: their gifts are behind the idle lock."""
     return {r["id"] for r in con.execute("SELECT id FROM people WHERE protected = 1")}

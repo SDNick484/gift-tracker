@@ -21,7 +21,7 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
   and filters on `gifts.PROTECTED_SQL`; every route that takes one gift checks `gifts.visible()` first. A user
   with no PIN is always locked. `tests/test_privacy.py` walks `app.url_map` and enforces this for every `/api/` route.
 - Read bodies with `json_body()` and strings with `text(data, key)`; bad shapes return 400. Never store non-finite numbers. Money is integer cents.
-- Everything user-typed goes through `esc()` before `innerHTML`. CSP allows no inline scripts and images only from this origin.
+- Everything user-typed goes through `esc()` before `innerHTML`. CSP allows no inline scripts, no inline styles and images only from this origin. Per-person colors are set through the CSSOM (`data-color` plus `applyColors()`), never `style=""`. `tests/test_frontend.py` scans `static/js` for both.
 - No gift title or person name in any `<title>`, the manifest, or a log line. Manifest name and page title are the `APP_NAME` setting, default `Ledger`.
 - Schema changes go through idempotent `migrate()` and bump `SCHEMA_VERSION`. No manual DB step on the host.
 - Family colors are data (`people.color`), not code.
@@ -53,8 +53,8 @@ occasions.py      occasions, per-person plan, carry-forward (copy_from), current
 gifts.py          gift CRUD, tracks (ours/theirs), status, Santa rule, history, visibility (PROTECTED_SQL)
 budgets.py        spent/planned totals, occasion summary
 boards.py         a protected person's board, assign, list text
-static/           index.html, style.css, manifest.json, icon.svg
-static/js/        ES modules
+static/           index.html (GET / fills in APP_NAME), style.css, manifest.json (GET /manifest.json adds the name), icon.svg
+static/js/        ES modules: main (router), core, api, lock and one module per screen
 tests/            conftest.py + one test file per module
 installer/        setup-head.sh, build.sh
 deploy/           deploy.env.example
@@ -89,7 +89,8 @@ Run before every commit; all of it must pass:
 
 ```sh
 python -m pytest -q && ruff check && for f in static/js/*.js; do node --check "$f"; done
+node --test tests/frontend.test.mjs
 shellcheck -s sh installer/setup-head.sh installer/build.sh ops/tracker-backup
 ```
 
-(The `node --check` loop applies once `static/js` exists.) CI (`.github/workflows/ci.yml`) runs pytest on Python 3.12 and the latest Python, pytest on Alpine's `py3-*` packages, `ruff check`, `node --check` and `shellcheck -s sh`. The backup tests need the `sqlite3` CLI and skip without it; the Alpine job installs it.
+CI (`.github/workflows/ci.yml`) runs pytest on Python 3.12 and the latest Python, pytest on Alpine's `py3-*` packages, `ruff check`, `node --check`, `node --test tests/frontend.test.mjs` and `shellcheck -s sh`. The backup tests need the `sqlite3` CLI and skip without it; the Alpine job installs it.
