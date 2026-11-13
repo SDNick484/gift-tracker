@@ -5,11 +5,14 @@ import types
 
 import pytest
 import test_privacy
-from conftest import auth, bearer, con_rows, mk_gift, mk_occasion, mk_token, mut
+from conftest import auth, bearer, con_rows, mk_gift, mk_occasion, mk_person, mk_token, mut
 
 import agent
+import app as tracker
+import db
 import exchanges
 import gifts
+import settings
 
 LOCKED = {"error": "Locked", "locked": True}
 
@@ -440,3 +443,48 @@ def test_copying_never_carries_a_protected_draw(client, ids, world, unlock):
     unlock()
     assert [e["draws"] for e in listing(client, ids, occasion=new)] == [[]]
     assert con_rows("SELECT COUNT(*) FROM exchange_draws") == [(4,)]
+
+
+# ---------------------------------------------------------------- school mode: exchanges, no lock, no protected drawer
+@pytest.fixture
+def staff(client, monkeypatch):
+    """A school instance (settings.MODE is read per request): an occasion, the two owners and two staff members."""
+    monkeypatch.setattr(settings, "MODE", "school")
+    owners = {p["name"]: p["id"] for p in client.get("/api/people", headers=auth()).get_json()}
+    return types.SimpleNamespace(o=mk_occasion(client, "Staff gifts", date="2026-12-18"), alex=owners["Alex"],
+                                 avery=mk_person(client, "Ms. Avery", role="homeroom"),
+                                 blake=mk_person(client, "Ms. Blake", role="assistant"))
+
+
+def test_exchanges_work_in_school_mode_and_nothing_is_locked(client, staff):
+    assert "unlocked" in client.get("/api/me", headers=auth()).get_json()
+    ex = mk_exchange(client, staff, name="Staff draw", budget=2000, occasion=staff.o)
+    assert put_draw(client, ex, staff.alex, staff.avery).status_code == 200
+    gid = mk_gift(client, staff.o, "Candle", to=[staff.avery], frm=[staff.alex], exchange_id=ex, price="25")
+    got = client.get(f"/api/occasions/{staff.o}/summary", headers=auth()).get_json()["exchanges"]
+    assert got == listing(client, staff, occasion=staff.o)
+    assert got[0]["draws"] == [{"drawer_id": staff.alex, "recipient_id": staff.avery, "gift_id": gid, "gift_title": "Candle",
+                                "gift_status": "idea", "price_cents": 2500, "over_budget": True}]
+    assert client.delete(f"/api/exchanges/{ex}", json={}, headers=mut()).status_code == 409   # a gift is linked; no unlock asked
+    assert "santa" not in client.get(f"/api/occasions/{staff.o}/summary", headers=auth()).get_data(as_text=True).lower()
+
+
+def test_in_school_mode_only_owners_draw_and_no_draw_is_protected(client, staff):
+    ex = mk_exchange(client, staff, occasion=staff.o)
+    assert put_draw(client, ex, staff.avery, staff.blake).status_code == 400          # not an owner
+    # a stored protected flag (school mode cannot set one) is just data there: not a drawer, and nothing is hidden
+    client_con = db.connect(settings.DB_PATH)
+    client_con.execute("UPDATE people SET protected = 1 WHERE id IN (?, ?)", (staff.avery, staff.blake))
+    client_con.close()
+    assert put_draw(client, ex, staff.avery, staff.blake).status_code == 400
+    assert put_draw(client, ex, staff.alex, staff.avery).status_code == 200
+    gid = mk_gift(client, staff.o, "Candle", to=[staff.avery], frm=[staff.alex], exchange_id=ex)
+    assert [(d["recipient_id"], d["gift_id"]) for d in listing(client, staff, occasion=staff.o)[0]["draws"]] == [(staff.avery, gid)]
+    assert client.get(f"/api/gifts/{gid}", headers=auth()).status_code == 200
+    assert client.delete(f"/api/exchanges/{ex}/draws/{staff.alex}", json={}, headers=mut()).status_code == 409
+
+
+def test_no_exchange_route_is_mode_specific(client):
+    for rule in tracker.app.url_map.iter_rules():
+        if "exchange" in rule.endpoint:
+            assert getattr(tracker.app.view_functions[rule.endpoint], "mode_only", None) is None, rule.endpoint
