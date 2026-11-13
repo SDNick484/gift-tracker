@@ -9,12 +9,14 @@ from urllib.parse import urlparse
 from flask import Flask, abort, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+import addresses
 import boards
 import budgets
 import db as database
 import gifts
 import identity
 import lock
+import locations
 import occasions
 import people
 import school
@@ -443,6 +445,57 @@ def gifts_assign(gift_id):
     giver_ids, expected = boards.parse_assign(json_body())
     boards.assign(db(), gift_id, giver_ids, expected)
     return jsonify(gift_json(visible_gift(gift_id)))
+
+
+# -- after purchase: ship-to addresses (both modes) and hiding places (family only: school mode has none).
+# Deleting either needs the unlock: "an order ships there" or "something is hidden there" (409) against "deleted"
+# would tell a locked caller that a hidden gift uses it. Neither list says which gifts use what.
+@app.get("/api/addresses")
+def addresses_list():
+    return jsonify(addresses.list_all(db()))
+
+
+@app.post("/api/addresses")
+def addresses_create():
+    return jsonify(addresses.create(db(), json_body())), 201
+
+
+@app.patch("/api/addresses/<int:address_id>")
+def addresses_update(address_id):
+    return jsonify(addresses.update(db(), address_id, json_body()))
+
+
+@app.delete("/api/addresses/<int:address_id>")
+@unlock_required
+def addresses_delete(address_id):
+    addresses.delete(db(), address_id)
+    return jsonify(ok=True)
+
+
+@app.get("/api/locations")
+@family_only
+def locations_list():
+    return jsonify(locations.tree(db()))
+
+
+@app.post("/api/locations")
+@family_only
+def locations_create():
+    return jsonify(locations.create(db(), json_body())), 201
+
+
+@app.patch("/api/locations/<int:location_id>")
+@family_only
+def locations_update(location_id):
+    return jsonify(locations.update(db(), location_id, json_body()))
+
+
+@app.delete("/api/locations/<int:location_id>")
+@family_only
+@unlock_required
+def locations_delete(location_id):
+    locations.delete(db(), location_id)
+    return jsonify(ok=True)
 
 
 init_db()
