@@ -47,9 +47,18 @@ def test_valid_jwt_for_allowed_email(client):
 
 
 def test_me_returns_display_name_and_app_name(client):
+    sam = next(p["id"] for p in client.get("/api/people", headers=auth()).get_json() if p["name"] == "Sam")
     assert client.get("/api/me", headers=auth("sam@example.com")).get_json() == \
-        {"email": "sam@example.com", "name": "Sam", "app_name": "Ledger", "has_pin": False, "unlocked": False,
-         "lock_idle_seconds": 300}
+        {"email": "sam@example.com", "name": "Sam", "person_id": sam, "app_name": "Ledger", "has_pin": False,
+         "unlocked": False, "lock_idle_seconds": 300}
+
+
+def test_me_person_id_follows_a_rename_of_the_users_person(client):
+    """The UI offers "me / the other owner / both" as givers, so it needs the person row, not a name match."""
+    sam = client.get("/api/me", headers=auth("sam@example.com")).get_json()["person_id"]
+    assert client.patch(f"/api/people/{sam}", json={"name": "Dad"}, headers=mut()).status_code == 200
+    me = client.get("/api/me", headers=auth("sam@example.com")).get_json()
+    assert (me["name"], me["person_id"]) == ("Sam", sam)
 
 
 def test_email_is_compared_lowercased(client):

@@ -134,8 +134,8 @@ def healthz():
 
 @app.get("/api/me")
 def me():
-    return jsonify(email=g.user["email"], name=g.user["name"], app_name=settings.APP_NAME,
-                   has_pin=lock.has_pin(db(), g.user["email"]), unlocked=unlocked(),
+    return jsonify(email=g.user["email"], name=g.user["name"], person_id=people.person_id_of(db(), g.user["email"]),
+                   app_name=settings.APP_NAME, has_pin=lock.has_pin(db(), g.user["email"]), unlocked=unlocked(),
                    lock_idle_seconds=settings.LOCK_IDLE_SECONDS)
 
 
