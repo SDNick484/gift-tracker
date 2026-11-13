@@ -182,8 +182,12 @@ def update(con, gift_id: int, data: dict) -> None:
         if givers is not None:
             _set_givers(con, gift_id, givers)
         if recipients is not None:
-            con.execute("DELETE FROM gift_recipients WHERE gift_id = ?", (gift_id,))
-            con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)", [(gift_id, p) for p in recipients])
+            # Change the set, not the rows: a recipient who stays keeps their detail and done flag (school mode).
+            have = set(_ids(con, "gift_recipients", gift_id))
+            con.executemany("DELETE FROM gift_recipients WHERE gift_id = ? AND person_id = ?",
+                            [(gift_id, p) for p in have - set(recipients)])
+            con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)",
+                            [(gift_id, p) for p in recipients if p not in have])
         if santa is not None:
             _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con))
             f["santa"] = int(santa)

@@ -6,7 +6,7 @@ import json
 import os
 from urllib.parse import urlparse
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, abort, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 import boards
@@ -17,8 +17,9 @@ import identity
 import lock
 import occasions
 import people
+import school
 import settings
-from common import ApiError, json_body, locked
+from common import ApiError, is_school, json_body, locked
 
 app = Flask(__name__)
 app.json.sort_keys = False
@@ -82,7 +83,7 @@ def unlocked() -> bool:
     """Whether this request is past the idle lock: it may see and change gifts with a protected recipient, and
     Santa. Worked out once per request; the lock routes set g.unlocked themselves."""
     if "unlocked" not in g:
-        g.unlocked = lock.is_unlocked(request, g.user["email"])
+        g.unlocked = is_school() or lock.is_unlocked(request, g.user["email"])  # school mode has no lock
     return g.unlocked
 
 
@@ -96,11 +97,31 @@ def unlock_required(view):
     return wrapper
 
 
+# ---- modes. A route that exists in one mode only answers the generic 404 in the other (the body of a path that does
+# not exist), so the API of a family instance has no school routes and a school instance has no lock or boards.
+# The wrapper carries `mode_only` so tests can find every such view through app.url_map.
+def _mode_only(mode, wrong_mode):
+    def decorate(view):
+        @functools.wraps(view)
+        def wrapper(*args, **kwargs):
+            if wrong_mode():
+                abort(404)
+            return view(*args, **kwargs)
+        wrapper.mode_only = mode
+        return wrapper
+    return decorate
+
+
+family_only = _mode_only("family", is_school)
+school_only = _mode_only("school", lambda: not is_school())
+
+
 @app.after_request
 def slide_unlock(resp):
     """Re-issue the unlock cookie on every response to an unlocked request (the idle window slides), and clear a
-    cookie that no longer unlocks (expired, another user's, or after POST /api/lock/lock)."""
-    if "user" in g:
+    cookie that no longer unlocks (expired, another user's, or after POST /api/lock/lock). School mode has no
+    lock and no cookie."""
+    if "user" in g and not is_school():
         if unlocked():
             lock.set_cookie(resp, g.user["email"])
         elif lock.COOKIE in request.cookies:
@@ -154,13 +175,15 @@ def manifest():
 
 @app.get("/api/me")
 def me():
+    mode = {"mode": "school"} if is_school() else {}  # a family instance's answer has no mode key
     return jsonify(email=g.user["email"], name=g.user["name"], person_id=people.person_id_of(db(), g.user["email"]),
                    app_name=settings.APP_NAME, has_pin=lock.has_pin(db(), g.user["email"]), unlocked=unlocked(),
-                   lock_idle_seconds=settings.LOCK_IDLE_SECONDS)
+                   lock_idle_seconds=settings.LOCK_IDLE_SECONDS, **mode)
 
 
 # -- the idle lock
 @app.post("/api/lock/pin")
+@family_only
 def lock_set_pin():
     """Set a PIN, or change one with `current`. Does not unlock."""
     data, email = json_body(), g.user["email"]
@@ -177,6 +200,7 @@ def lock_set_pin():
 
 
 @app.post("/api/lock/unlock")
+@family_only
 def lock_unlock():
     pin, email = json_body().get("pin"), g.user["email"]
     if not isinstance(pin, str):
@@ -190,6 +214,7 @@ def lock_unlock():
 
 
 @app.post("/api/lock/lock")
+@family_only
 def lock_lock():
     g.unlocked = False  # slide_unlock clears the cookie
     return jsonify(ok=True, unlocked=False)
@@ -285,7 +310,10 @@ def occasion_plan_remove(occasion_id, person_id):
 # While locked, a gift with a protected recipient answers exactly like a gift that does not exist (404), a write
 # may not give a gift a protected recipient or touch Santa (423), and gift JSON carries no `santa` key.
 def gift_json(row):
-    return gifts.to_json(db(), row, unlocked=unlocked())
+    out = gifts.to_json(db(), row, unlocked=unlocked())
+    if is_school():
+        out.pop("santa", None)  # school mode has no Santa, whatever the column says
+    return out
 
 
 def visible_gift(gift_id):
@@ -296,6 +324,10 @@ def visible_gift(gift_id):
 
 
 def refuse_locked_write(data: dict) -> None:
+    if is_school():
+        if "santa" in data:
+            raise ApiError(400, "Santa is not used in school mode.")
+        return  # nothing is locked in school mode
     if unlocked():
         return
     if isinstance(data.get("santa"), bool):  # any other value is 400 in gifts; null changes nothing
@@ -363,14 +395,47 @@ def occasion_summary(occasion_id):
     return jsonify(budgets.summary(db(), occasion_id, unlocked=unlocked()))
 
 
+# -- school mode: the staff-by-gift matrix. These exist only when MODE=school (school_only: 404 otherwise).
+@app.get("/api/occasions/<int:occasion_id>/matrix")
+@school_only
+def school_matrix(occasion_id):
+    return jsonify(school.matrix(db(), occasion_id, unlocked=unlocked()))
+
+
+@app.put("/api/gifts/<int:gift_id>/recipients/<int:person_id>")
+@school_only
+def school_cell_set(gift_id, person_id):
+    """Add the person to the gift (201) or update their cell (200): {detail?, done?}."""
+    visible_gift(gift_id)
+    out, created = school.set_cell(db(), gift_id, person_id, json_body())
+    return jsonify(out), 201 if created else 200
+
+
+@app.delete("/api/gifts/<int:gift_id>/recipients/<int:person_id>")
+@school_only
+def school_cell_remove(gift_id, person_id):
+    visible_gift(gift_id)
+    return jsonify(school.remove_cell(db(), gift_id, person_id))
+
+
+@app.post("/api/gifts/<int:gift_id>/recipients")
+@school_only
+def school_role_add(gift_id):
+    """{role}: everyone with that role becomes a recipient."""
+    visible_gift(gift_id)
+    return jsonify(school.add_role(db(), gift_id, json_body()))
+
+
 # -- a protected person's board
 @app.get("/api/occasions/<int:occasion_id>/board/<int:person_id>")
+@family_only
 @unlock_required
 def person_board(occasion_id, person_id):
     return jsonify(boards.board(db(), occasion_id, person_id))
 
 
 @app.post("/api/gifts/<int:gift_id>/assign")
+@family_only
 @unlock_required
 def gifts_assign(gift_id):
     """{giver_ids, expected_giver_ids}: 409 when the givers are no longer the ones the caller saw."""

@@ -39,6 +39,17 @@ the build order is `docs/superpowers/plans/2026-11-12-gift-tracker-core.md`. Do 
   `gifts.visible()`, and a board-like route takes `@unlock_required`.
 - A new route of any kind stays behind the identity guard: `tests/test_identity.py` walks `app.url_map` and expects 403 from the LAN everywhere but `/healthz`.
 
+## School mode (`MODE=school`)
+
+A second instance of the same code (its own database, subdomain and Access policy): staff gifts, a `role` on each person, a `detail` and a `done` flag on each recipient of a gift, and the staff-by-gift matrix (`school.py`, `static/js/school.js`). The decisions are in `docs/superpowers/plans/2026-11-13-school-instance.md`.
+
+- Ask `common.is_school()`, never a copy of `settings.MODE` taken at import: tests switch the mode with `monkeypatch.setattr(settings, "MODE", "school")`.
+- Family mode must not change: a family response gains no key (`mode` on `/api/me` and `role` on a person exist in school mode only), and `role` in a request body is ignored there.
+- A route that exists in one mode only is wrapped in `family_only` or `school_only` (under the route decorator): the other mode answers the generic 404 `{"error": "Not Found"}`. Lock, board and assign are family-only; the four matrix and cell routes are school-only. `tests/test_school.py` pins both lists (`FAMILY_ONLY`, `SCHOOL_ONLY`), so a new mode-specific route is added there.
+- School mode has no lock: `app.unlocked()` is true, so the lock's filtering hides nothing. What must not appear is removed at the edges: `gift_json` drops `santa` and `refuse_locked_write` answers 400 when a body names it; `people._person` reports `protected: false` and setting it true is 400. A response built any other way must go through those.
+- `gifts.update` changes the recipient set; it must never delete and re-insert `gift_recipients` rows, or every edit of a group gift erases its details.
+- The installer's names and paths come from the block between `# instance-begin` and `# instance-end`, and the service script is the template between `# initd-begin` and `# initd-end`. Nothing else may hard-code `/opt/tracker` or the service name; `tests/test_installer_static.py` pins the default install's names, paths, port and rendered service script.
+
 ## File structure
 
 ```

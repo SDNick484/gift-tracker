@@ -4,9 +4,10 @@ import re
 import sqlite3
 
 import db
-from common import ApiError, flag, text, whole
+from common import ApiError, flag, is_school, text, whole
 
 COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+MAX_ROLE = 50  # school mode: free text such as homeroom, assistant, special subject, administrator
 US = "Us"  # the group and household the owners are seeded into
 
 
@@ -108,10 +109,15 @@ def get_person(con, person_id: int) -> dict:
 
 
 def _person(row) -> dict:
-    return {"id": row["id"], "name": row["name"], "group_id": row["group_id"], "household": row["household"],
-            "color": row["color"], "protected": bool(row["protected"]), "active": bool(row["active"]),
+    # School mode has no lock, so nobody is protected whatever the column says (a database copied from a family
+    # instance may have 1s in it). `role` exists in school mode only: family responses gain no key.
+    out = {"id": row["id"], "name": row["name"], "group_id": row["group_id"], "household": row["household"],
+            "color": row["color"], "protected": bool(row["protected"]) and not is_school(), "active": bool(row["active"]),
             "sort_order": row["sort_order"], "is_user": bool(row["is_user"]),
             "wishlist_person_id": row["wishlist_person_id"], "notes": row["notes"]}
+    if is_school():
+        out["role"] = row["role"]
+    return out
 
 
 def _person_fields(con, data: dict, partial: bool) -> dict:
@@ -136,6 +142,8 @@ def _person_fields(con, data: dict, partial: bool) -> dict:
         if color is not None and not (isinstance(color, str) and COLOR.fullmatch(color)):
             raise ApiError(400, "color must look like #1a2b3c.")
         out["color"] = color
+    if is_school() and "protected" in data and flag(data, "protected", False):
+        raise ApiError(400, "Nobody is protected in school mode.")
     for key in ("protected", "active"):
         if key in data:
             out[key] = int(flag(data, key, key == "active"))
@@ -148,6 +156,11 @@ def _person_fields(con, data: dict, partial: bool) -> dict:
         out["notes"] = notes or None
     if "sort_order" in data:
         out["sort_order"] = whole(data, "sort_order", 0)
+    if is_school() and "role" in data:
+        role = text(data, "role")
+        if len(role) > MAX_ROLE:
+            raise ApiError(400, "role is too long.")
+        out["role"] = role or None
     return out
 
 

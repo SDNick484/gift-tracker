@@ -9,6 +9,8 @@
   DEV_EMAIL          development only: admit loopback requests without Cloudflare headers as this email
   APP_NAME           page title and home-screen name (default Ledger)
   LOCK_IDLE_SECONDS  idle time before the protected section locks (default 300)
+  MODE               family (default) or school: school makes this instance the staff-gift tracker, with no lock,
+                     no Santa, no protected people and no boards (see common.is_school)
 """
 import os
 import re
@@ -53,3 +55,8 @@ CF_AUD = os.environ.get("CF_AUD", "").strip()
 DEV_EMAIL = os.environ.get("DEV_EMAIL", "").strip().lower()
 APP_NAME = os.environ.get("APP_NAME", "").strip() or "Ledger"
 LOCK_IDLE_SECONDS: int = _int("LOCK_IDLE_SECONDS", 300, 1)
+
+MODES = ("family", "school")
+MODE = os.environ.get("MODE", "").strip().lower() or "family"
+if MODE not in MODES:
+    raise ValueError(f"MODE must be one of {', '.join(MODES)}")

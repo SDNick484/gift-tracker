@@ -26,7 +26,7 @@ find "$STAGE" \( -name __pycache__ -o -name .pytest_cache \) -exec rm -rf {} \; 
 DEFAULTS="$STAGE/defaults"
 : > "$DEFAULTS"
 if [ -f "$ENV_FILE" ]; then
-  for key in ALLOWED_EMAILS USERS APP_NAME CF_TEAM_DOMAIN CF_AUD; do
+  for key in ALLOWED_EMAILS USERS APP_NAME CF_TEAM_DOMAIN CF_AUD MODE; do
     val=$(sed -n "s/^$key=//p" "$ENV_FILE" | head -n1 | sed "s/^[\"']//;s/[\"']\$//")
     if printf '%s' "$val" | grep -q '["`$\\]'; then
       echo "$key in $ENV_FILE contains a character that is not allowed: double quote, backtick, dollar sign or backslash."; exit 1
