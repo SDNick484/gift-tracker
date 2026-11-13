@@ -1,0 +1,29 @@
+#!/bin/sh
+# Nightly backup of the Gift Tracker database (installed to /etc/periodic/daily by setup-tracker.sh).
+#   $BACKUP_DIR/tracker-<date>.db     mode 0600, in a 0700 directory, kept KEEP_DAYS days
+# The database holds every secret (who is getting what, what is from Santa): treat the copies like it.
+# DATA_DIR, BACKUP_DIR, KEEP_DAYS and LOG may be overridden for a test run.
+set -u
+umask 077
+DATA_DIR=${DATA_DIR:-/var/lib/tracker}
+BACKUP_DIR=${BACKUP_DIR:-/var/backups/tracker}
+KEEP_DAYS=${KEEP_DAYS:-14}
+LOG=${LOG:-/var/log/tracker-backup.log}
+DB=$DATA_DIR/tracker.db
+STAMP=$(date +%Y-%m-%d)
+OUT=$BACKUP_DIR/tracker-$STAMP.db
+log() { echo "$(date '+%F %T') tracker-backup: $*" >> "$LOG" 2>/dev/null || true; }
+
+[ -f "$DB" ] || { log "no database at $DB yet, nothing to back up"; exit 0; }
+mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
+rm -f "$OUT.part"
+if sqlite3 "$DB" ".backup '$OUT.part'" && [ "$(sqlite3 "$OUT.part" 'PRAGMA integrity_check;')" = "ok" ]; then
+  chmod 600 "$OUT.part" && mv -f "$OUT.part" "$OUT"
+  log "ok ($(du -h "$OUT" | cut -f1))"
+else
+  rm -f "$OUT.part"
+  log "FAILED"
+  exit 1
+fi
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'tracker-*.db' -mtime +"$KEEP_DAYS" -exec rm -f {} +
+exit 0
