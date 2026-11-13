@@ -219,3 +219,5 @@ input[type="color"] { width: 44px; height: 44px; padding: 3px; border: 1px solid
 @media (max-width: 480px) {
   .two { grid-template-columns: 1fr; }
 }
+
+button.row { width: 100%; text-align: left; cursor: pointer; font: inherit; color: inherit; }

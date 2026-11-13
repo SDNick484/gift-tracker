@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ApiError, events, get, send } from "../static/js/api.js";
+import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
 test("esc escapes the five HTML characters", () => {
@@ -139,4 +140,37 @@ test("other errors carry the server's message and do not dispatch `locked`", asy
   await assert.rejects(get("/api/me"), e => e.status === 0 && /reach/.test(e.message));
   events.removeEventListener("locked", on);
   assert.equal(fired, 0);
+});
+
+// ---------------------------------------------------------------- home.js
+const person = (over = {}) => ({ id: 5, name: "Pat", color: "#1f4d3a", plan: "individual", budget_cents: 7500, spent_cents: 0, planned_cents: 0, gift_count: 0, headline: null, ...over });
+const summary = (over = {}) => ({
+  occasion: { id: 1, name: "Christmas", kind: "christmas", date: "2026-12-25", archived: false }, days_until: 43,
+  groups: [{ id: 1, name: "Side A", people: [person()] }], protected: { locked: true, people: [] }, ...over,
+});
+
+test("home: amounts, plans and the occasion picker", () => {
+  assert.deepEqual(amountText(person({ spent_cents: 2999, planned_cents: 500 })), { main: "$29.99 of $75.00", sub: "+$5.00 planned" });
+  assert.deepEqual(amountText(person({ budget_cents: null, spent_cents: 0 })), { main: "$0.00", sub: "" });
+  assert.equal(planLabel("exchange"), "exchange only");
+  assert.equal(planLabel("individual"), "");
+  assert.equal(planLabel(null), "");
+  assert.deepEqual(occasionChoices([{ id: 1, name: "Old", archived: true }, { id: 2, name: "New", archived: false }]),
+    [{ value: 2, label: "New" }, { value: 1, label: "Old (archived)" }]);
+});
+
+test("home: names, headlines and colors are escaped, and a protected section only shows as a locked row", () => {
+  const evil = person({ name: `<img src=x onerror=alert(1)>`, headline: `"><script>x</script>`, color: `red" onmouseover="x` });
+  const html = renderHome(summary({ groups: [{ id: 1, name: `<b>G</b>`, people: [evil] }] }), [{ id: 1, name: "<i>X</i>", archived: false }], true);
+  assert.ok(!/<img|<script|<b>|<i>|onmouseover/.test(html), html);
+  assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;"));
+  assert.ok(!html.includes("data-color"), "a color that is not #rrggbb is not passed on");
+  assert.ok(html.includes("43 days") && html.includes('data-act="unlock"') && html.includes("Locked"));
+  assert.ok(renderHome(summary(), [], true).includes('data-color="#1f4d3a"'));
+  assert.ok(!renderHome(summary(), [], false).includes('data-act="unlock"'), "no protected people: nothing to unlock");
+});
+
+test("home: unlocked, one row per protected person linking to the board", () => {
+  const html = renderHome(summary({ protected: { locked: false, people: [person({ id: 9, name: "Riley", headline: "Puzzle" })] } }), [], true);
+  assert.ok(html.includes('href="#/board/9"') && html.includes("Puzzle") && !html.includes('data-act="unlock"'));
 });
