@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ApiError, events, get, send } from "../static/js/api.js";
+import { backTarget, forChoices, fromChoices, render as renderIdeaScreen } from "../static/js/idea.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
@@ -173,4 +174,32 @@ test("home: names, headlines and colors are escaped, and a protected section onl
 test("home: unlocked, one row per protected person linking to the board", () => {
   const html = renderHome(summary({ protected: { locked: false, people: [person({ id: 9, name: "Riley", headline: "Puzzle" })] } }), [], true);
   assert.ok(html.includes('href="#/board/9"') && html.includes("Puzzle") && !html.includes('data-act="unlock"'));
+});
+
+// ---------------------------------------------------------------- idea.js
+test("idea: For lists the most recently used first and leaves out the owners", () => {
+  const people = [{ id: 1, name: "Alex", is_user: true }, { id: 3, name: "Pat" }, { id: 4, name: "Lee" }, { id: 5, name: "Jordan" }];
+  assert.deepEqual(forChoices(people, []).map(c => c.value), [3, 4, 5]);
+  assert.deepEqual(forChoices(people, [5, 99, 1, 4]).map(c => c.value), [5, 4, 3]);
+  assert.deepEqual(forChoices(people, [5]), [{ value: 5, label: "Jordan" }, { value: 3, label: "Pat" }, { value: 4, label: "Lee" }]);
+});
+
+test("idea: From offers me first, the other owner, then both (the default)", () => {
+  const owners = [{ id: 1, name: "Alex" }, { id: 2, name: "Sam" }];
+  assert.deepEqual(fromChoices(owners, 2), [
+    { value: "2", label: "Sam (me)", ids: [2] }, { value: "1", label: "Alex", ids: [1] }, { value: "1,2", label: "Both", ids: [1, 2] }]);
+  assert.deepEqual(fromChoices(owners, null).map(c => c.label), ["Alex", "Sam", "Both"]);
+  assert.deepEqual(fromChoices([owners[0]], 1), [{ value: "1", label: "Alex (me)", ids: [1] }]);
+});
+
+test("idea: Save returns to where the user came from, never to the idea form itself", () => {
+  assert.equal(backTarget("#/person/4"), "#/person/4");
+  assert.equal(backTarget("#/idea?for=3"), "#/");
+  assert.equal(backTarget(""), "#/");
+});
+
+test("idea: with no occasion there is nothing to save into", async () => {
+  const view = { innerHTML: "" };
+  await renderIdeaScreen({ view, query: {}, alive: () => true });
+  assert.ok(view.innerHTML.includes("Create an occasion first."));
 });
