@@ -487,3 +487,52 @@ def test_no_school_mode_request_is_a_server_error(client, ids, school):
                     sent += 1
                     assert r.status_code < 500, (method, url, body, r.status_code, r.get_data(as_text=True)[:200])
     assert sent > 200
+
+
+# ---------------------------------------------------------------- agent tokens and /api/v1 in school mode
+def test_school_mode_has_all_three_scopes_and_no_unlocked_tokens(client, school):
+    import tokens
+    assert tokens.scopes() == ("delivery", "shop", "full")
+    for scope in tokens.scopes():                                  # no PIN needed: school mode has no lock
+        r = client.post("/api/tokens", json={"name": f"{scope} agent", "scope": scope}, headers=mut())
+        assert r.status_code == 201 and r.get_json()["unlocked"] is False
+    r = client.post("/api/tokens", json={"name": "Owner", "scope": "full", "unlocked": True}, headers=mut())
+    assert (r.status_code, r.get_json()) == (400, {"error": "There is no lock in school mode."})
+    assert [t["name"] for t in client.get("/api/tokens", headers=auth()).get_json()] == ["full agent", "shop agent", "delivery agent"]
+
+
+def test_v1_in_school_mode_has_no_santa_or_location_keys(client, staff):
+    from conftest import bearer, mk_token
+    t = mk_token("full", "Owner")
+    # A database copied from a family instance: Santa set, a hiding place, and a token made unlocked there.
+    import db
+    c = db.connect(settings.DB_PATH)
+    c.execute("INSERT INTO locations (id, name) VALUES (1, 'Garage')")
+    c.execute("UPDATE gifts SET santa = 1, location_id = 1 WHERE id = ?", (staff.card35,))
+    c.execute("UPDATE api_tokens SET unlocked = 1")
+    c.close()
+    assert client.get("/api/v1/me", headers=bearer(t)).get_json() == {"name": "Owner", "scope": "full", "unlocked": False, "mode": "school"}
+    shown = [client.get(f"/api/v1/gifts/{staff.card35}", headers=bearer(t)).get_json(),
+             *client.get(f"/api/v1/gifts?occasion_id={staff.o}", headers=bearer(t)).get_json(),
+             client.patch(f"/api/v1/gifts/{staff.card35}/order", json={"seller": "Coffee shop"}, headers=bearer(t)).get_json(),
+             client.post(f"/api/v1/gifts/{staff.card35}/status", json={"status": "decided"}, headers=bearer(t)).get_json(),
+             client.post("/api/v1/gifts", json={"occasion_id": staff.o, "title": "Mug", "recipient_ids": [staff.ellis]},
+                         headers=bearer(t)).get_json()]
+    assert len(shown) == 8
+    for gift in shown:
+        assert not {"santa", "location_id", "location_path"} & set(gift), gift
+    r = client.post("/api/v1/gifts", json={"occasion_id": staff.o, "title": "Mug", "recipient_ids": [staff.ellis], "santa": False},
+                    headers=bearer(t))
+    assert (r.status_code, r.get_json()) == (400, {"error": "Santa is not used in school mode."})
+    people = client.get("/api/v1/people", headers=bearer(t)).get_json()
+    assert next(p for p in people if p["id"] == staff.avery)["role"] == "homeroom"
+    for scope in ("delivery", "shop"):
+        low = mk_token(scope)
+        assert all(not forbidden_in(g) for g in client.get(f"/api/v1/gifts?occasion_id={staff.o}", headers=bearer(low)).get_json())
+
+
+def test_no_v1_route_is_mode_specific():
+    v1 = [r for r in tracker.app.url_map.iter_rules() if r.rule.startswith("/api/v1")]
+    assert len(v1) >= 10
+    assert not [r.endpoint for r in v1 if getattr(tracker.app.view_functions[r.endpoint], "mode_only", None)]
+    assert not {r.endpoint for r in v1} & (FAMILY_ONLY | SCHOOL_ONLY)
