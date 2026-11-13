@@ -38,9 +38,9 @@ db.py             SCHEMA, SCHEMA_VERSION, MIGRATIONS, connect(), transaction(), 
 common.py         json_body, text, flag, whole, parse_cents, today, ApiError
 identity.py       Cloudflare JWT verification, resolve_user()
 lock.py           PIN hashing, unlock cookie, is_unlocked()
-people.py         groups, people, households, users
-occasions.py      occasions, per-person plan, carry-forward
-gifts.py          gift CRUD, tracks, status, Santa rule, visibility
+people.py         groups, people, households, seeded users (ensure_users runs at start-up)
+occasions.py      occasions, per-person plan, carry-forward (copy_from), current()
+gifts.py          gift CRUD, tracks (ours/theirs), status, Santa rule, history; visibility arrives with lock.py
 budgets.py        spent/planned totals, occasion summary
 boards.py         a protected person's board, assign, list text
 static/           index.html, style.css, manifest.json, icon.svg

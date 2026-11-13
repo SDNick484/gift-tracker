@@ -80,7 +80,6 @@ def test_delete_person_without_gifts_and_user_person_is_refused(client):
     assert client.delete(f"/api/people/{alex}", headers=mut()).status_code == 409
 
 
-@pytest.mark.xfail(strict=True, reason="needs occasions and gifts: Tasks 4 and 5")
 def test_delete_person_with_gifts_is_409_and_deactivate_keeps_history(client):
     pid = mk_person(client, "Jordan"); oid = mk_occasion(client); mk_gift(client, oid, "Book", to=[pid])
     r = client.delete(f"/api/people/{pid}", headers=mut())

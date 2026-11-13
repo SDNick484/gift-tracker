@@ -7,6 +7,7 @@ from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
 import db as database
+import gifts
 import identity
 import occasions
 import people
@@ -177,6 +178,62 @@ def occasion_plan_set(occasion_id, person_id):
 def occasion_plan_remove(occasion_id, person_id):
     occasions.remove_plan(db(), occasion_id, person_id)
     return jsonify(ok=True)
+
+
+# -- gifts
+def unlocked() -> bool:
+    """Whether this request may see Santa labels. Until the idle lock exists (plan Task 7) every request is
+    unlocked; that task replaces this with lock.is_unlocked(request, g.user["email"])."""
+    return True
+
+
+def gift_json(row):
+    return gifts.to_json(db(), row, unlocked=unlocked())
+
+
+@app.post("/api/gifts")
+def gifts_create():
+    gid = gifts.create(db(), g.user, json_body())
+    return jsonify(gift_json(gifts.get(db(), gid))), 201
+
+
+@app.get("/api/gifts/<int:gift_id>")
+def gifts_get(gift_id):
+    return jsonify(gift_json(gifts.get(db(), gift_id)))
+
+
+@app.patch("/api/gifts/<int:gift_id>")
+def gifts_update(gift_id):
+    gifts.update(db(), gift_id, json_body())
+    return jsonify(gift_json(gifts.get(db(), gift_id)))
+
+
+@app.delete("/api/gifts/<int:gift_id>")
+def gifts_delete(gift_id):
+    gifts.delete(db(), gift_id)
+    return jsonify(ok=True)
+
+
+@app.post("/api/gifts/<int:gift_id>/status")
+def gifts_status(gift_id):
+    status = json_body().get("status")
+    if not isinstance(status, str):
+        raise ApiError(400, "status must be text.")
+    gifts.set_status(db(), gift_id, status)
+    return jsonify(gift_json(gifts.get(db(), gift_id)))
+
+
+@app.get("/api/occasions/<int:occasion_id>/people/<int:person_id>/gifts")
+def person_gifts(occasion_id, person_id):
+    return jsonify([gift_json(r) for r in gifts.list_for_person(db(), occasion_id, person_id)])
+
+
+@app.get("/api/people/<int:person_id>/history")
+def person_history(person_id):
+    rows = gifts.history(db(), person_id)
+    return jsonify(person=people.get_person(db(), person_id),
+                   gifts=[{**gift_json(r), "occasion": {"id": r["occasion_id"], "name": r["occasion_name"],
+                                                         "date": r["occasion_date"]}} for r in rows])
 
 
 init_db()

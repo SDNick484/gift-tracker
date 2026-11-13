@@ -126,3 +126,21 @@ def freeze_today(monkeypatch):
     def freeze(day):
         monkeypatch.setattr(common, "today", lambda: day)
     return freeze
+
+
+@pytest.fixture
+def ids(client):
+    """One occasion (2026-12-25) and people: alex and sam are the seeded users; jordan, riley and casey are adults;
+    kid1 to kid3 are protected children."""
+    ppl = {p["name"]: p["id"] for p in client.get("/api/people", headers=auth()).get_json()}
+    names = {"jordan": "Jordan", "riley": "Riley", "casey": "Casey"}
+    out = {"alex": ppl["Alex"], "sam": ppl["Sam"], "o": mk_occasion(client)}
+    out.update({k: mk_person(client, n) for k, n in names.items()})
+    out.update({f"kid{i}": mk_person(client, f"Kid {i}", protected=True) for i in (1, 2, 3)})
+    return types.SimpleNamespace(**out)
+
+
+@pytest.fixture
+def unlock():
+    """Task 7 makes this open the idle lock. Until the lock exists every request is unlocked, so it does nothing."""
+    return lambda: None
