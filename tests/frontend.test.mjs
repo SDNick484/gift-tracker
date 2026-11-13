@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { ApiError, events, get, send } from "../static/js/api.js";
 import { backTarget, forChoices, fromChoices, render as renderIdeaScreen } from "../static/js/idea.js";
 import { findEntry, giftLine, groupByOccasion, renderPage, totalsText } from "../static/js/person.js";
+import { buildPatch, canSanta, pickList, renderPage as renderGiftPage, renderSteps, stepClass } from "../static/js/gift.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
 import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
 
@@ -244,4 +245,57 @@ test("person: titles, names and notes are escaped, Santa only shows when the ser
   assert.ok(html.includes('value="75.00"') && html.includes('<option value="joint" selected>'));
   assert.ok(html.includes("inactive") && html.includes('data-color="#1f4d3a"') && !html.includes("Board"));
   assert.ok(renderPage({ ...person, protected: true }, "", occasion, null, null, [], [], people4).includes('href="#/board/3"'));
+});
+
+// ---------------------------------------------------------------- gift.js
+const fullGift = (over = {}) => ({
+  id: 10, occasion_id: 1, title: "Camera", status: "ordered", track: "ours", url: null, store: null, price_cents: 8900, notes: null,
+  recipient_ids: [3], giver_ids: [1, 2], told_at: null, santa: false, ...over,
+});
+
+test("gift: Santa needs the flag from the server, an ours gift and an owner among the givers", () => {
+  assert.equal(canSanta(fullGift(), people4), true);
+  assert.equal(canSanta(fullGift({ giver_ids: [1] }), people4), true);
+  assert.equal(canSanta(fullGift({ giver_ids: [] }), people4), false, "no giver yet: not from an owner");
+  assert.equal(canSanta(fullGift({ giver_ids: [4], track: "theirs" }), people4), false);
+  const locked = fullGift(); delete locked.santa;
+  assert.equal(canSanta(locked, people4), false, "no santa key while locked");
+});
+
+test("gift: status steps follow the track and mark the current and earlier ones", () => {
+  const ours = renderSteps(fullGift());
+  assert.deepEqual([...ours.matchAll(/data-status="(\w+)"/g)].map(m => m[1]), ["idea", "decided", "ordered", "arrived", "wrapped", "given"]);
+  assert.ok(ours.includes('class="step done" data-status="decided" aria-pressed="false"'));
+  assert.ok(ours.includes('class="step" data-status="ordered" aria-pressed="true"'));
+  assert.deepEqual([...renderSteps(fullGift({ track: "theirs", status: "told" })).matchAll(/data-status="(\w+)"/g)].map(m => m[1]), ["told", "confirmed", "given"]);
+  assert.equal(stepClass(0, 2), "step done");
+  assert.equal(stepClass(2, 2), "step");
+  assert.equal(stepClass(0, -1), "step", "a status not on this track marks nothing done");
+});
+
+test("gift: who can be ticked", () => {
+  const ppl = [...people4, { id: 7, name: "Kid", protected: true, active: true }, { id: 8, name: "Old", active: false }].map(p => ({ active: true, ...p }));
+  const ids = (selected, o) => pickList(ppl, selected, o).map(p => p.id);
+  assert.deepEqual(ids([], { unlocked: false, recipients: true }), [3, 4]);
+  assert.deepEqual(ids([], { unlocked: true, recipients: true }), [3, 4, 7]);
+  assert.deepEqual(ids([], { unlocked: false, recipients: false }), [1, 2, 3, 4]);
+  assert.deepEqual(ids([8, 2], { unlocked: false, recipients: true }), [2, 3, 4, 8], "people already on the gift stay");
+});
+
+test("gift: the PATCH body trims, keeps the price as typed text and insists on a title and a recipient", () => {
+  const f = { title: " Camera ", url: "", store: " Shop ", price: " $89.00 ", notes: "", recipientIds: [3], giverIds: [1] };
+  assert.deepEqual(buildPatch(f), { title: "Camera", url: "", store: "Shop", price: "$89.00", notes: "", recipient_ids: [3], giver_ids: [1] });
+  assert.throws(() => buildPatch({ ...f, title: "  " }), /title/);
+  assert.throws(() => buildPatch({ ...f, recipientIds: [] }), /recipient/);
+  assert.deepEqual(buildPatch({ ...f, giverIds: [] }).giver_ids, []);
+});
+
+test("gift: page escapes everything typed and only offers Santa when the flag is there", () => {
+  const evil = fullGift({ title: `</textarea><script>1</script>`, notes: `</textarea><img src=x>`, store: `"><b>`, url: `"x" onfocus="y`, santa: true });
+  const html = renderGiftPage(evil, people4, "<i>X</i>", true);
+  assert.ok(!/<script|<img|<b>|<i>/.test(html), html);
+  assert.ok(html.includes('id="santa" checked'));
+  const locked = fullGift(); delete locked.santa;
+  assert.ok(!renderGiftPage(locked, people4, "X", false).includes('id="santa"'));
+  assert.ok(renderGiftPage(fullGift({ giver_ids: [3], track: "theirs", status: "told", told_at: "2026-11-20" }), people4, "X", true).includes("Told 2026-11-20"));
 });
