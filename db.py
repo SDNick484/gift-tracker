@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -128,6 +128,26 @@ def _to_v4(con):
 
 
 MIGRATIONS[4] = _to_v4
+
+
+# Version 5 (gift exchanges): an exchange belongs to an occasion (name, budget, date; budget and date may be unset);
+# a draw is one member of the owners' household and the person drawn, one draw per drawer; `gifts.exchange_id` links
+# the gift for a draw. The link has no cascade: an exchange that gifts use cannot be deleted, so a gift is never
+# silently unlinked (which, for a gift from a protected drawer, would un-hide it).
+def _to_v5(con):
+    con.execute("CREATE TABLE exchanges (id INTEGER PRIMARY KEY, "
+                "occasion_id INTEGER NOT NULL REFERENCES occasions(id) ON DELETE CASCADE, "
+                "name TEXT NOT NULL, budget_cents INTEGER, date TEXT)")
+    con.execute("CREATE INDEX exchanges_occasion ON exchanges(occasion_id)")
+    con.execute("CREATE TABLE exchange_draws (exchange_id INTEGER NOT NULL REFERENCES exchanges(id) ON DELETE CASCADE, "
+                "drawer_id INTEGER NOT NULL REFERENCES people(id), recipient_id INTEGER NOT NULL REFERENCES people(id), "
+                "PRIMARY KEY (exchange_id, drawer_id))")
+    con.execute("CREATE INDEX exchange_draws_recipient ON exchange_draws(recipient_id)")
+    con.execute("ALTER TABLE gifts ADD COLUMN exchange_id INTEGER REFERENCES exchanges(id)")
+    con.execute("CREATE INDEX gifts_exchange ON gifts(exchange_id)")
+
+
+MIGRATIONS[5] = _to_v5
 
 
 def migrate(con):
