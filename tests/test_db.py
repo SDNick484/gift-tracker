@@ -393,3 +393,83 @@ def test_the_cache_has_one_row_and_aliases_are_unique_and_cascade(con):
         con.execute("INSERT INTO wishlist_aliases (kind, value, person_id) VALUES ('phone', 'x', 101)")
     con.execute("DELETE FROM people WHERE id = 101")
     assert con.execute("SELECT COUNT(*) FROM wishlist_aliases").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- version 8: ideas and typed givers
+def _v7_database(path):
+    """A database exactly as version 7 left it, with one gift."""
+    c = db.connect(str(path))
+    for stmt in db._statements(db.SCHEMA):
+        c.execute(stmt)
+    for version in (2, 3, 4, 5, 6, 7):
+        db.MIGRATIONS[version](c)
+    c.execute("INSERT INTO meta VALUES ('schema_version', '7')")
+    c.execute("INSERT INTO people (id, name) VALUES (1, 'Kid 1')")
+    c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
+    c.execute("INSERT INTO gifts (id, occasion_id, title, status, created_by, created_at, updated_at) "
+              "VALUES (1, 1, 'Card', 'idea', 'a', 0, 0)")
+    c.execute("INSERT INTO gift_recipients (gift_id, person_id) VALUES (1, 1)")
+    return c
+
+
+def test_v7_database_migrates_to_v8_keeping_rows(tmp_path):
+    c = _v7_database(tmp_path / "t.db")
+    before = tuple(c.execute("SELECT id, occasion_id, title, status, created_by FROM gifts").fetchone())
+    db.migrate(c)
+    assert db.SCHEMA_VERSION >= 8
+    assert c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
+    row = c.execute("SELECT id, occasion_id, title, status, created_by, giver_name FROM gifts").fetchone()
+    assert tuple(row)[:5] == before and row["giver_name"] is None
+    assert c.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM idea_people").fetchone()[0] == 0
+    db.migrate(c)  # again: nothing changes
+    assert c.execute("SELECT COUNT(*) FROM gifts").fetchone()[0] == 1
+    c.close()
+
+
+def test_the_v8_migrated_tables_match_a_fresh_database(tmp_path, con):
+    c = _v7_database(tmp_path / "t.db")
+    db.migrate(c)
+    for table in ("gifts", "ideas", "idea_people"):
+        assert _shape(c, table) == _shape(con, table), table
+    for index in ("ideas_wishlist_item", "idea_people_gift"):
+        sql = f"SELECT sql FROM sqlite_master WHERE name = '{index}'"
+        assert c.execute(sql).fetchone()[0] == con.execute(sql).fetchone()[0]
+    c.close()
+
+
+def _idea(con, wish=None, title="Mug"):
+    return con.execute("INSERT INTO ideas (title, wishlist_item_id, created_by, created_at, updated_at) "
+                       "VALUES (?, ?, 'a', 0, 0)", (title, wish)).lastrowid
+
+
+def test_idea_people_gift_set_null_on_gift_delete(con):
+    con.execute("INSERT INTO people (id, name) VALUES (101, 'Casey')")
+    con.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'X', 'christmas', '2026-12-25')")
+    con.execute("INSERT INTO gifts (id, occasion_id, title, status, created_by, created_at, updated_at) "
+                "VALUES (1, 1, 'G', 'idea', 'a', 0, 0)")
+    idea = _idea(con)
+    con.execute("INSERT INTO idea_people (idea_id, person_id, gift_id) VALUES (?, 101, 1)", (idea,))
+    con.execute("DELETE FROM gifts WHERE id = 1")
+    assert con.execute("SELECT gift_id FROM idea_people").fetchone()[0] is None
+    assert con.execute("SELECT COUNT(*) FROM idea_people").fetchone()[0] == 1
+
+
+def test_deleting_an_idea_deletes_its_tags_and_a_tag_is_unique_per_person(con):
+    con.execute("INSERT INTO people (id, name) VALUES (101, 'Casey')")
+    idea = _idea(con)
+    con.execute("INSERT INTO idea_people (idea_id, person_id) VALUES (?, 101)", (idea,))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO idea_people (idea_id, person_id) VALUES (?, 101)", (idea,))
+    con.execute("DELETE FROM ideas WHERE id = ?", (idea,))
+    assert con.execute("SELECT COUNT(*) FROM idea_people").fetchone()[0] == 0
+
+
+def test_ideas_one_per_wish(con):
+    _idea(con, wish=7)
+    with pytest.raises(sqlite3.IntegrityError):
+        _idea(con, wish=7)
+    _idea(con)
+    _idea(con)  # any number without a wish
+    assert con.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] == 3
+    assert con.execute("SELECT share FROM ideas").fetchone()[0] == 0

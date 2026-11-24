@@ -216,8 +216,7 @@ def test_a_v6_database_migrates_to_v7_adding_the_owners_to_a_protected_drawers_g
     status = dict(c.execute("SELECT id, status FROM gifts").fetchall())
     assert status == {1: "decided", 2: "arrived", 3: "given", 4: "told", 5: "idea", 6: "told", 7: "idea"}
     snapshot = (c.execute("SELECT * FROM gifts ORDER BY id").fetchall(), c.execute("SELECT * FROM gift_givers ORDER BY 1, 2").fetchall())
-    c.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")   # run the step again over migrated data
-    db.migrate(c)
+    db.MIGRATIONS[7](c)   # run the step again over migrated data
     assert (c.execute("SELECT * FROM gifts ORDER BY id").fetchall(), c.execute("SELECT * FROM gift_givers ORDER BY 1, 2").fetchall()) == snapshot
     c.close()
 
