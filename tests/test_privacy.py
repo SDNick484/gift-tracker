@@ -31,9 +31,15 @@ def world(client, ids, clock):
     import settings
     c = db.connect(settings.DB_PATH)
     c.execute("UPDATE gifts SET santa = 1 WHERE id = ?", (visible,))
+    # Ideas (ideas.py): one tagged with a protected child and Jordan, inserted past the lock, and a visible control.
+    import ideas
+    user = {"email": "alex@example.com", "name": "Alex"}
+    secret_idea = ideas.create(c, user, {"title": "ZZ-SECRET-IDEA-ROW", "person_ids": [ids.kid1, ids.jordan],
+                                         "store": "ZZ-SECRET-STORE", "share": True})
+    visible_idea = ideas.create(c, user, {"title": "VISIBLE-IDEA", "person_ids": [ids.jordan]})
     c.close()
     return types.SimpleNamespace(ids=ids, group=group, shared=shared, theirs=theirs, idea=idea, visible=visible,
-                                 secret=(shared, theirs, idea))
+                                 secret=(shared, theirs, idea), secret_idea=secret_idea, visible_idea=visible_idea)
 
 
 def args(w):
@@ -41,6 +47,8 @@ def args(w):
     i = w.ids
     return {
         "gift_id": [*w.secret, w.visible, 999999],
+        # the ideas this file's world makes; other files' worlds (test_school, test_exchanges, test_cogiver) have none
+        "idea_id": [*(getattr(w, k) for k in ("secret_idea", "visible_idea") if hasattr(w, k)), 999999],
         "occasion_id": [i.o],
         "person_id": [i.kid1, i.kid2, i.kid3, i.jordan, i.casey, i.alex],
         "group_id": [w.group],
@@ -90,14 +98,18 @@ def walk_gets(client, w, query=("", "?inactive=1")):
 
 
 def protected_state():
-    """Everything about protected gifts and who is protected. A locked request must leave all of it unchanged."""
+    """Everything about protected gifts and ideas and who is protected. A locked request must leave all of it
+    unchanged."""
     prot = ("SELECT g.id FROM gifts g WHERE EXISTS (SELECT 1 FROM gift_recipients r JOIN people p ON p.id = r.person_id "
             "WHERE r.gift_id = g.id AND p.protected = 1)")
+    prot_idea = ("SELECT ip.idea_id FROM idea_people ip JOIN people p ON p.id = ip.person_id WHERE p.protected = 1")
     return (
         con_rows(f"SELECT * FROM gifts WHERE id IN ({prot}) ORDER BY id"),
         con_rows(f"SELECT * FROM gift_recipients WHERE gift_id IN ({prot}) ORDER BY gift_id, person_id"),
         con_rows(f"SELECT * FROM gift_givers WHERE gift_id IN ({prot}) ORDER BY gift_id, person_id"),
         con_rows("SELECT id FROM people WHERE protected = 1 ORDER BY id"),
+        con_rows(f"SELECT * FROM ideas WHERE id IN ({prot_idea}) ORDER BY id"),
+        con_rows(f"SELECT * FROM idea_people WHERE idea_id IN ({prot_idea}) ORDER BY idea_id, person_id"),
     )
 
 
@@ -111,6 +123,7 @@ def test_no_api_route_leaks_protected_data_when_locked(client, world):
         assert not leaks(text), (url, leaks(text))
     # The walk does reach gift data: the visible gift shows up, so the absence above means something.
     assert any("VISIBLE-GIFT" in t for t in seen.values())
+    assert any("VISIBLE-IDEA" in t for t in seen.values())
 
 
 def test_the_walk_would_catch_a_leak(client, world, unlock):
@@ -118,6 +131,7 @@ def test_the_walk_would_catch_a_leak(client, world, unlock):
     unlock()
     seen = walk_gets(client, world, query=("",))
     assert any("ZZ-SECRET-GIFT" in t for t in seen.values())
+    assert any("ZZ-SECRET-IDEA-ROW" in t for t in seen.values())
     assert any('"santa"' in t for t in seen.values())
 
 
@@ -169,7 +183,7 @@ def test_an_inactive_protected_person_is_still_protected(client, world):
 # ---------------------------------------------------------------- writing
 HOSTILE = [
     # tries to make a gift protected, or to change a protected one, or to unprotect a person
-    {"title": "pwned", "name": "pwned", "status": "given", "recipient_ids": "KID", "giver_ids": "CASEY",
+    {"title": "pwned", "name": "pwned", "status": "given", "recipient_ids": "KID", "person_ids": "KID", "giver_ids": "CASEY",
      "expected_giver_ids": [], "occasion_id": "O", "protected": False, "price": "1", "plan": "skip",
      "budget_cents": 1, "kind": "other", "date": "2026-12-25"},
     # tries to move a protected gift out from behind the lock
@@ -199,6 +213,8 @@ def test_no_locked_mutation_changes_or_reveals_a_protected_gift(client, world):
                     assert r.status_code < 500, (method, url, r.status_code)
                     assert not leaks(r.get_data(as_text=True)), (method, url)
                     if values.get("gift_id") in world.secret:
+                        assert r.status_code in (404, 423), (method, url, r.status_code)
+                    if values.get("idea_id") == world.secret_idea:
                         assert r.status_code in (404, 423), (method, url, r.status_code)
                     assert protected_state() == before, (method, url, body)
     assert sent > 50

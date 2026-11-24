@@ -119,11 +119,17 @@ def _person_ids(con, data: dict, key: str) -> list[int] | None:
 
 
 def _fields(data: dict, partial: bool) -> dict:
+    return item_fields(data, partial, "A gift")
+
+
+def item_fields(data: dict, partial: bool, noun: str) -> dict:
+    """Title, url, store, notes and price as stored on a gift or an idea (ideas.py). `noun` starts the title message
+    ("A gift", "An idea"). With `partial`, a missing title is left alone."""
     out = {}
     if not partial or "title" in data:
         title = text(data, "title")
         if not title or len(title) > 200:
-            raise ApiError(400, "A gift needs a title of 1 to 200 characters.")
+            raise ApiError(400, f"{noun} needs a title of 1 to 200 characters.")
         out["title"] = title
     if "url" in data:
         url = text(data, "url")

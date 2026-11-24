@@ -179,8 +179,8 @@ def update_person(con, person_id: int, data: dict) -> dict:
 
 
 def delete_person(con, person_id: int) -> None:
-    """Refused for an owner's own person and for anyone a gift refers to: deactivate them instead, which keeps
-    their gifts and history and drops them from new occasions."""
+    """Refused for an owner's own person and for anyone a gift, a draw or an idea refers to: deactivate them instead,
+    which keeps their gifts and history and drops them from new occasions."""
     with db.transaction(con):
         get_person(con, person_id)  # 404
         if person_id in user_person_ids(con):
@@ -191,6 +191,8 @@ def delete_person(con, person_id: int) -> None:
             raise ApiError(409, "This person has gifts. Deactivate them instead.")
         if con.execute("SELECT 1 FROM exchange_draws WHERE drawer_id = ? OR recipient_id = ?", (person_id, person_id)).fetchone():
             raise ApiError(409, "This person is in a gift exchange. Deactivate them instead.")
+        if con.execute("SELECT 1 FROM idea_people WHERE person_id = ?", (person_id,)).fetchone():
+            raise ApiError(409, "This person has ideas. Deactivate them instead.")
         con.execute("DELETE FROM people WHERE id = ?", (person_id,))
 
 

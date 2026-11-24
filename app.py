@@ -17,6 +17,7 @@ import db as database
 import exchanges
 import gifts
 import identity
+import ideas
 import lists
 import lock
 import locations
@@ -365,9 +366,10 @@ def refuse_locked_write(data: dict) -> None:
         return
     if isinstance(data.get("santa"), bool):  # any other value is 400 in gifts; null changes nothing
         raise locked()
-    rids = data.get("recipient_ids")
-    if isinstance(rids, list) and people.protected_ids(db()) & {i for i in rids if isinstance(i, int)}:
-        raise locked()
+    for key in ("recipient_ids", "person_ids"):  # a gift's recipients, an idea's tagged people
+        named = data.get(key)
+        if isinstance(named, list) and people.protected_ids(db()) & {i for i in named if isinstance(i, int)}:
+            raise locked()
 
 
 def refuse_locked_exchange_write(data: dict, gift_id: int | None = None) -> None:
@@ -440,6 +442,59 @@ def person_history(person_id):
     return jsonify(person=people.get_person(db(), person_id),
                    gifts=[{**gift_json(r), "occasion": {"id": r["occasion_id"], "name": r["occasion_name"],
                                                          "date": r["occasion_date"]}} for r in rows])
+
+
+# -- ideas (family only). As for gifts: while locked, a protected idea (a protected person tagged, or a copy taken by
+# a protected gift) answers exactly like a missing one (404), and a write may not tag a protected person (423).
+def visible_idea(idea_id):
+    """The idea's JSON, or the same 404 as a missing idea when it is protected and this request is locked."""
+    if not ideas.visible(db(), idea_id, unlocked=unlocked()):
+        raise ApiError(404, "No such idea.")
+    return ideas.get_json(db(), idea_id)
+
+
+@app.get("/api/ideas")
+@family_only
+def ideas_list():
+    """Every idea, or with ?person=<id> those tagged with that person. A protected person's list is empty while locked."""
+    person = request.args.get("person")
+    if person is not None and not (person.isascii() and person.isdigit()):
+        raise ApiError(400, "person must be a person id.")
+    return jsonify(ideas.list_json(db(), unlocked=unlocked(), person_id=None if person is None else int(person)))
+
+
+@app.post("/api/ideas")
+@family_only
+def ideas_create():
+    data = json_body()
+    refuse_locked_write(data)
+    return jsonify(visible_idea(ideas.create(db(), g.user, data))), 201
+
+
+@app.get("/api/ideas/<int:idea_id>")
+@family_only
+def ideas_get(idea_id):
+    return jsonify(visible_idea(idea_id))
+
+
+@app.patch("/api/ideas/<int:idea_id>")
+@family_only
+def ideas_update(idea_id):
+    """Answers {"deleted": true} when the body leaves the idea with no people (person_ids: [])."""
+    visible_idea(idea_id)
+    data = json_body()
+    refuse_locked_write(data)
+    if ideas.update(db(), idea_id, data):
+        return jsonify(deleted=True)
+    return jsonify(visible_idea(idea_id))
+
+
+@app.delete("/api/ideas/<int:idea_id>")
+@family_only
+def ideas_delete(idea_id):
+    visible_idea(idea_id)
+    ideas.delete(db(), idea_id)
+    return jsonify(ok=True)
 
 
 # -- budgets
