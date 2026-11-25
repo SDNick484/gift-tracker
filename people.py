@@ -170,17 +170,28 @@ def create_person(con, data: dict) -> dict:
     return get_person(con, cur.lastrowid)
 
 
+PROTECT_TAKEN = "This person is on an idea already taken for someone else. Untag them first."
+UNPROTECT_TAKEN = "This person has a gift from an idea that is also for someone behind the lock. Send it back to ideas first."
+
+
 def update_person(con, person_id: int, data: dict) -> dict:
+    """Changing `protected` must not leave an idea hidden while a gift taken from it shows (ideas.EXPOSED_SQL): 409.
+    Protecting needs no unlock, but every idea and gift that check reads was visible before the change, so the 409
+    tells a locked caller nothing; unprotecting needs the unlock (app.py)."""
+    import ideas  # late: ideas imports this module
     get_person(con, person_id)  # 404
     f = _person_fields(con, data, partial=True)
     if f:
-        con.execute(f"UPDATE people SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), person_id))
+        with db.transaction(con):
+            con.execute(f"UPDATE people SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), person_id))
+            if "protected" in f and ideas.exposed(con):
+                raise ApiError(409, PROTECT_TAKEN if f["protected"] else UNPROTECT_TAKEN)
     return get_person(con, person_id)
 
 
 def delete_person(con, person_id: int) -> None:
-    """Refused for an owner's own person and for anyone a gift refers to: deactivate them instead, which keeps
-    their gifts and history and drops them from new occasions."""
+    """Refused for an owner's own person and for anyone a gift, a draw or an idea refers to: deactivate them instead,
+    which keeps their gifts and history and drops them from new occasions."""
     with db.transaction(con):
         get_person(con, person_id)  # 404
         if person_id in user_person_ids(con):
@@ -191,6 +202,8 @@ def delete_person(con, person_id: int) -> None:
             raise ApiError(409, "This person has gifts. Deactivate them instead.")
         if con.execute("SELECT 1 FROM exchange_draws WHERE drawer_id = ? OR recipient_id = ?", (person_id, person_id)).fetchone():
             raise ApiError(409, "This person is in a gift exchange. Deactivate them instead.")
+        if con.execute("SELECT 1 FROM idea_people WHERE person_id = ?", (person_id,)).fetchone():
+            raise ApiError(409, "This person has ideas. Deactivate them instead.")
         con.execute("DELETE FROM people WHERE id = ?", (person_id,))
 
 

@@ -6,7 +6,7 @@ Privacy: a token is locked unless sees_protected() (a `full` token made with `un
 token never gets a gift with a protected recipient, a protected person, a `santa` key or a hiding place: lists filter
 on gifts.PROTECTED_SQL, one-gift routes answer the same 404 as a missing gift (visible_row), and a protected person
 named in a body is "No such person.", as a missing one is. No scope but `full` gets `santa`, a hiding place, givers
-or created_by at all.
+(ids or a typed name) or created_by at all, and nothing here writes a typed giver name.
 
 Writes go through the same functions as the web app (orders.update, gifts.set_status, gifts.create), so every rule
 holds here too (marking ordered needs seller, ship-to and eta), and each leaves a note with the token's name
@@ -91,7 +91,7 @@ def gift_json(con, row, token: dict) -> dict:
     if token["scope"] == "full":
         out = {**gifts.to_json(con, row, unlocked=sees_protected(token)), "recipients": recipients, **order}
         if is_school():
-            for key in ("santa", "location_id", "location_path"):
+            for key in ("santa", "location_id", "location_path", "giver_name"):
                 out.pop(key, None)
         return out
     out = {"id": row["id"], "occasion_id": row["occasion_id"], "title": row["title"], "status": row["status"],
@@ -214,6 +214,8 @@ def create_gift(con, data: dict, token: dict) -> int:
         raise ApiError(400, "Santa is not used in school mode.")
     if data.get("exchange_id") is not None:
         raise ApiError(400, "Exchanges are not available to agents.")
+    if "giver_name" in data:
+        raise ApiError(400, "Typed givers are not available to agents.")
     if "santa" in data and data["santa"] is not None and not sees_protected(token):
         raise refuse(token)
     if not sees_protected(token):

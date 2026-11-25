@@ -77,6 +77,10 @@ this.
 - A gift from someone else set to `confirmed` or `given`: `purchase` true. Set back to `told`: `purchase` false, then
   `reserve` with the label again (the purchase ended the reservation).
 - Deleting a gift that holds a feed reservation: `reserve` with `null`.
+- The `by` label is built from the giver ids and, when the gift has one, its typed giver name (for example a relative's
+  name), joined with the household label by ` & ` and cut at 80 characters.
+- Pulling a wish over to a person's board creates an idea in the tracker and sends nothing. The wish is sent only when
+  an idea copy is taken as a gift (`reserve` with the label), and the take is undone if the wishlist refuses it.
 - Never for Santa, for a gift's own status track (decided, ordered, arrived, wrapped), or for anything in school mode.
 
 If the tracker's own write fails after the wishlist accepted a change, it sends the change back (the reservation as the

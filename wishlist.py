@@ -35,6 +35,7 @@ import common
 import db
 import exchanges
 import gifts
+import ideas
 import occasions
 import people
 import settings
@@ -47,6 +48,7 @@ MAX_BYTES = 2 * 1024 * 1024   # the largest answer read; a feed over this is "un
 MAX_AGE = 60                  # a read refreshes a feed older than this many seconds
 RETRY_AFTER = 30              # ... unless the last attempt failed less than this many seconds ago
 LABEL_MAX = 80                # the wishlist cuts `by` at 80 characters
+assert gifts.GIVER_NAME_MAX == LABEL_MAX  # a typed giver name fits in `by` whole
 FEED_PATH = "/api/feed"
 PURCHASED = ("confirmed", "given")  # a theirs-track gift in one of these is purchased on the wishlist
 
@@ -261,18 +263,24 @@ def refresh(con) -> bool:
     return True
 
 
+# (table, the table naming each row's people, its key column): the rows that can be linked to a wish
+_LINKED = (("gifts", "gift_recipients", "gift_id"), ("ideas", "idea_people", "idea_id"))
+
+
 def _unlink_gone(con, feed: dict) -> None:
-    """A gift linked to a wish that is no longer in the feed becomes an ordinary (off-list) gift, but only when the tab
-    of one of its recipients is in the feed: a tab taken out of the wishlist's FEED_PEOPLE does not wipe the links."""
+    """A gift or idea linked to a wish that is no longer in the feed becomes an ordinary (off-list) one, but only when
+    the tab of one of its people is in the feed: a tab taken out of the wishlist's FEED_PEOPLE does not wipe the links."""
     present = {it["id"] for p in feed["people"] for it in p["items"]}
     tabs = {p["id"] for p in feed["people"]}
-    for r in con.execute("SELECT id, wishlist_item_id FROM gifts WHERE wishlist_item_id IS NOT NULL").fetchall():
-        if r["wishlist_item_id"] in present:
-            continue
-        rtabs = {x[0] for x in con.execute("SELECT p.wishlist_person_id FROM gift_recipients gr JOIN people p "
-                                           "ON p.id = gr.person_id WHERE gr.gift_id = ?", (r["id"],))}
-        if rtabs & tabs:
-            con.execute("UPDATE gifts SET wishlist_item_id = NULL, updated_at = ? WHERE id = ?", (common.now(), r["id"]))
+    for table, people_table, key in _LINKED:
+        for r in con.execute(f"SELECT id, wishlist_item_id FROM {table} WHERE wishlist_item_id IS NOT NULL").fetchall():
+            if r["wishlist_item_id"] in present:
+                continue
+            rtabs = {x[0] for x in con.execute(f"SELECT p.wishlist_person_id FROM {people_table} t JOIN people p "
+                                               f"ON p.id = t.person_id WHERE t.{key} = ?", (r["id"],))}
+            if rtabs & tabs:
+                con.execute(f"UPDATE {table} SET wishlist_item_id = NULL, updated_at = ? WHERE id = ?",
+                            (common.now(), r["id"]))
 
 
 def _feed(con) -> dict | None:
@@ -310,6 +318,25 @@ def item(con, item_id) -> dict | None:
     return None
 
 
+def held(con, item_id) -> str | None:
+    """Who holds this wish on the wishlist, as the cache shows it: the purchaser, else the reserver; None when it is
+    open, not in the cache, or the link is off. An idea's copy is "held" by this (ideas.copy_state)."""
+    if item_id is None or not enabled():
+        return None
+    it = item(con, item_id)
+    if it is None:
+        return None
+    if it["purchased"]:
+        return it["purchased_by"] or "Someone"
+    return it["reserved_by"]
+
+
+def _linked_ids(con) -> set[int]:
+    """Every wish a gift or an idea names: none of them is open to pull over."""
+    return {r[0] for r in con.execute("SELECT wishlist_item_id FROM gifts WHERE wishlist_item_id IS NOT NULL "
+                                      "UNION SELECT wishlist_item_id FROM ideas WHERE wishlist_item_id IS NOT NULL")}
+
+
 def _patch_cache(con, item_id: int, **changes) -> None:
     """Record in the cache what a successful write did, so the board shows it without a refetch. Runs inside the
     writer's transaction: if that rolls back, so does this."""
@@ -330,12 +357,14 @@ def us_label(con) -> str:
     return next(iter(hs)) if len(hs) == 1 and next(iter(hs)) else people.US
 
 
-def label(con, giver_ids) -> str | None:
+def label(con, giver_ids, giver_name=None) -> str | None:
     """The `by` written for these givers, or None for no giver. Any owner among them is the owners' household label
     (so it is the same for Santa and not, and for one owner or both); anyone else is their household, else their
-    name. Distinct parts joined by " & ", at most LABEL_MAX characters. Takes nothing but the giver ids, on purpose."""
+    name; a typed giver name is one more part. Distinct parts joined by " & ", at most LABEL_MAX characters. Takes
+    nothing but the givers, on purpose."""
     ids = set(giver_ids or ())
-    if not ids:
+    name = (giver_name or "").strip()
+    if not ids and not name:
         return None
     owners = people.user_person_ids(con)
     parts = [us_label(con)] if ids & owners else []
@@ -344,6 +373,8 @@ def label(con, giver_ids) -> str | None:
         part = (r["household"] or r["name"]).strip() if r else ""
         if part and part not in parts:
             parts.append(part)
+    if name and name not in parts:
+        parts.append(name)
     return " & ".join(parts)[:LABEL_MAX].strip() or None
 
 
@@ -385,8 +416,8 @@ def _expected(con, gift_id: int) -> tuple[bool, str | None]:
     """What the wishlist should show for a linked gift: (purchased, by)."""
     row = gifts.get(con, gift_id)
     givers = exchanges.drawer_only(con, gift_id, gifts._ids(con, "gift_givers", gift_id))
-    trk = gifts.track(set(givers), people.user_person_ids(con))
-    return trk == "theirs" and row["status"] in PURCHASED, label(con, givers)
+    trk = gifts.track(set(givers), people.user_person_ids(con), row["giver_name"])
+    return trk == "theirs" and row["status"] in PURCHASED, label(con, givers, row["giver_name"])
 
 
 def _in_sync(it: dict, expected: tuple[bool, str | None]) -> bool:
@@ -407,14 +438,14 @@ def decorate_board(con, board: dict, person_id: int) -> None:
     """Add the wishlist to a board (boards.board's answer, for an unlocked caller):
 
     board["wishlist"] = {linked, tab_id, reachable, fetched_at, age_seconds, tabs, open, reserved, unmatched}: the
-    wishes on the person's tab with no gift in the tracker, open ones in `open`, reserved or purchased ones in
-    `reserved` with the matched `person_id` (or None) and the wishlist's `label`; each unmatched holder once in
+    wishes on the person's tab that no gift or idea in the tracker names, open ones in `open`, reserved or purchased
+    ones in `reserved` with the matched `person_id` (or None) and the wishlist's `label`; each unmatched holder once in
     `unmatched` ({kind, value, label}) for the owner to map. And on every gift linked to a wish, gift["wish"] =
     {item_id, listed, reserved_by, purchased, purchased_by, in_sync}."""
     state = current(con)
     tab = people.get_person(con, person_id)["wishlist_person_id"]
     by_id = {it["id"]: it for p in state["people"] for it in p["items"]}
-    linked_ids = {r[0] for r in con.execute("SELECT wishlist_item_id FROM gifts WHERE wishlist_item_id IS NOT NULL")}
+    linked_ids = _linked_ids(con)
     items = next((p["items"] for p in state["people"] if p["id"] == tab), []) if tab is not None else []
     open_, reserved, unmatched, seen = [], [], [], set()
     for it in items:
@@ -452,22 +483,25 @@ def overview(con, *, max_age: int = MAX_AGE) -> dict:
 
 
 def add_wish(con, user: dict, occasion_id: int, person_id: int, item_id: int) -> int:
-    """Put an open wish of the person's tab on their board: a gift linked to it with the wish's name, link, store and
-    price, no giver, status idea. Sends nothing (an unassigned gift and an open wish agree); assigning it is the
-    ordinary assign. 404 for a wish that is not on this person's tab in the cache; 409 when it is taken."""
+    """Pull an open wish of the person's tab over as an idea for that person alone: the wish's name, link, store and
+    price, linked to it, share off; answers the idea id. Sends nothing (an open copy and an open wish agree); taking
+    the idea reserves it (take_idea). 404 for a wish that is not on this person's tab in the cache; 409 when someone
+    holds it, or a gift or idea already names it."""
     occasions.get(con, occasion_id)  # 404
     person = boards._protected_person(con, person_id)  # 404 for anyone without a board
     it = item(con, item_id)
     if it is None or person["wishlist_person_id"] is None or it["tab_id"] != person["wishlist_person_id"]:
         raise ApiError(404, "No such wish.")
     if it["purchased"] or it["reserved_by"] is not None:
-        raise ApiError(409, "Someone already has this on the wishlist. Reload.")
-    data = {"occasion_id": occasion_id, "title": it["name"] or "Wish", "recipient_ids": [person_id], "giver_ids": [],
-            "url": it["url"], "store": it["store"], "price": it["price_cents"]}
+        raise ApiError(409, ideas.HELD)
+    if item_id in _linked_ids(con):
+        raise ApiError(409, ideas.ON_A_BOARD)
+    data = {"title": it["name"] or "Wish", "person_ids": [person_id], "url": it["url"], "store": it["store"],
+            "price": it["price_cents"]}
     try:
-        return gifts.create(con, user, data, wishlist_item_id=item_id)
-    except sqlite3.IntegrityError:
-        raise ApiError(409, "This wish is already on a board. Reload.") from None
+        return ideas.create(con, user, data, wishlist_item_id=item_id)
+    except sqlite3.IntegrityError:  # another idea named it meanwhile
+        raise ApiError(409, ideas.ON_A_BOARD) from None
 
 
 # ---------------------------------------------------------------- aliases: a wishlist holder mapped once to a person
@@ -615,9 +649,32 @@ def _write_through(con, gift_id: int, write, sync=_sync) -> None:
         raise
 
 
-def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int]) -> None:
+def take_idea(con, user: dict, idea_id: int, person_id: int, data: dict) -> int:
+    """ideas.take, and for an idea linked to a listed wish the wish reserved under the new givers' label. The gift is
+    made first (ideas.take carries the wish link onto it); if the reservation fails for any reason, anything the
+    wishlist accepted is taken back (_write_through) and the gift is deleted, which reopens the copy: 409 when the
+    wishlist refuses, 503 when it cannot be reached, and no gift either way."""
+    gid = ideas.take(con, user, idea_id, person_id, data)
+    if _listed(con, gid) is None:
+        return gid
+
+    def write(hook):
+        with db.transaction(con):
+            hook()
+    try:
+        _write_through(con, gid, write)
+    except BaseException:
+        gifts.delete(con, gid)
+        raise
+    return gid
+
+
+def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int], *, giver_name: str | None = None,
+           expected_giver_name: str | None = None) -> None:
     """boards.assign, and the wish reserved under the new givers' label (released when unassigned)."""
-    _write_through(con, gift_id, lambda hook: boards.assign(con, gift_id, giver_ids, expected_giver_ids, after_write=hook))
+    _write_through(con, gift_id, lambda hook: boards.assign(
+        con, gift_id, giver_ids, expected_giver_ids, after_write=hook, giver_name=giver_name,
+        expected_giver_name=expected_giver_name))
 
 
 def set_status(con, gift_id: int, status: str, order: dict | None, actor: str | None) -> None:
@@ -654,7 +711,7 @@ def refuse_agent_flip(con, gift_id: int, status) -> None:
         return
     row = gifts.get(con, gift_id)
     if gifts.track(set(exchanges.drawer_only(con, gift_id, gifts._ids(con, "gift_givers", gift_id))),
-                   people.user_person_ids(con)) != "theirs":
+                   people.user_person_ids(con), row["giver_name"]) != "theirs":
         return
     if (row["status"] in PURCHASED) != (status in PURCHASED):
         raise ApiError(409, "This gift is on the wishlist: change its status in the app.")

@@ -5,12 +5,14 @@ remembering to add a test here: give its path arguments a value in ARGS and it i
 Fixture data: three protected gifts with distinctive markers, one of them shared with the unprotected Jordan and
 from an owner with Santa set; one visible gift that also has Santa set, as a control."""
 import itertools
+import json
 import types
 
 import pytest
 from flask import url_for
 
 import app as tracker
+import ideas
 from conftest import PIN, auth, con_rows, mk_gift, mk_protected_gift, mut, set_pin
 
 MARKERS = ("zz-secret", "santa", "38888", "38889", "77777")   # lowercased; the last three are the shared gift's price and shares
@@ -23,7 +25,8 @@ def world(client, ids, clock):
     shared = mk_protected_gift(ids, title="ZZ-SECRET-GIFT", to=[ids.kid1, ids.jordan], frm=[ids.alex, ids.sam],
                                santa=True, price=77777, status="arrived", url="https://example.com/zz-secret-url",
                                store="ZZ-SECRET-STORE", notes="ZZ-SECRET-NOTE")
-    theirs = mk_protected_gift(ids, title="ZZ-SECRET-THEIRS", to=[ids.kid2], frm=[ids.casey])
+    theirs = mk_protected_gift(ids, title="ZZ-SECRET-THEIRS", to=[ids.kid2], frm=[ids.casey],
+                               giver_name="ZZ-SECRET-GIVER")
     idea = mk_protected_gift(ids, title="ZZ-SECRET-IDEA", to=[ids.kid3], frm=[])
     visible = mk_gift(client, ids.o, "VISIBLE-GIFT", to=[ids.jordan], frm=[ids.alex], price="12.34")
     # Santa on the visible gift goes in directly: through the API it needs the unlock.
@@ -31,9 +34,18 @@ def world(client, ids, clock):
     import settings
     c = db.connect(settings.DB_PATH)
     c.execute("UPDATE gifts SET santa = 1 WHERE id = ?", (visible,))
+    # Ideas (ideas.py): one tagged with a protected child and Jordan, inserted past the lock, and a visible control.
+    user = {"email": "alex@example.com", "name": "Alex"}
+    secret_idea = ideas.create(c, user, {"title": "ZZ-SECRET-IDEA-ROW", "person_ids": [ids.kid1, ids.jordan],
+                                         "store": "ZZ-SECRET-STORE", "share": True})
+    visible_idea = ideas.create(c, user, {"title": "VISIBLE-IDEA", "person_ids": [ids.jordan]})
+    # An idea for Jordan alone whose copy was taken by the shared protected gift: protected through that gift.
+    taken_idea = ideas.create(c, user, {"title": "ZZ-SECRET-TAKEN-IDEA", "person_ids": [ids.jordan], "share": True})
+    c.execute("UPDATE idea_people SET gift_id = ? WHERE idea_id = ?", (shared, taken_idea))
     c.close()
     return types.SimpleNamespace(ids=ids, group=group, shared=shared, theirs=theirs, idea=idea, visible=visible,
-                                 secret=(shared, theirs, idea))
+                                 secret=(shared, theirs, idea), secret_idea=secret_idea, visible_idea=visible_idea,
+                                 taken_idea=taken_idea)
 
 
 def args(w):
@@ -41,6 +53,8 @@ def args(w):
     i = w.ids
     return {
         "gift_id": [*w.secret, w.visible, 999999],
+        # the ideas this file's world makes; other files' worlds (test_school, test_exchanges, test_cogiver) have none
+        "idea_id": [*(getattr(w, k) for k in ("secret_idea", "taken_idea", "visible_idea") if hasattr(w, k)), 999999],
         "occasion_id": [i.o],
         "person_id": [i.kid1, i.kid2, i.kid3, i.jordan, i.casey, i.alex],
         "group_id": [w.group],
@@ -90,14 +104,18 @@ def walk_gets(client, w, query=("", "?inactive=1")):
 
 
 def protected_state():
-    """Everything about protected gifts and who is protected. A locked request must leave all of it unchanged."""
+    """Everything about protected gifts and ideas and who is protected. A locked request must leave all of it
+    unchanged."""
     prot = ("SELECT g.id FROM gifts g WHERE EXISTS (SELECT 1 FROM gift_recipients r JOIN people p ON p.id = r.person_id "
             "WHERE r.gift_id = g.id AND p.protected = 1)")
+    prot_idea = f"SELECT i.id FROM ideas i WHERE {ideas.PROTECTED_SQL}"
     return (
         con_rows(f"SELECT * FROM gifts WHERE id IN ({prot}) ORDER BY id"),
         con_rows(f"SELECT * FROM gift_recipients WHERE gift_id IN ({prot}) ORDER BY gift_id, person_id"),
         con_rows(f"SELECT * FROM gift_givers WHERE gift_id IN ({prot}) ORDER BY gift_id, person_id"),
         con_rows("SELECT id FROM people WHERE protected = 1 ORDER BY id"),
+        con_rows(f"SELECT * FROM ideas WHERE id IN ({prot_idea}) ORDER BY id"),
+        con_rows(f"SELECT * FROM idea_people WHERE idea_id IN ({prot_idea}) ORDER BY idea_id, person_id"),
     )
 
 
@@ -111,6 +129,7 @@ def test_no_api_route_leaks_protected_data_when_locked(client, world):
         assert not leaks(text), (url, leaks(text))
     # The walk does reach gift data: the visible gift shows up, so the absence above means something.
     assert any("VISIBLE-GIFT" in t for t in seen.values())
+    assert any("VISIBLE-IDEA" in t for t in seen.values())
 
 
 def test_the_walk_would_catch_a_leak(client, world, unlock):
@@ -118,6 +137,9 @@ def test_the_walk_would_catch_a_leak(client, world, unlock):
     unlock()
     seen = walk_gets(client, world, query=("",))
     assert any("ZZ-SECRET-GIFT" in t for t in seen.values())
+    assert any("ZZ-SECRET-IDEA-ROW" in t for t in seen.values())
+    assert any("ZZ-SECRET-TAKEN-IDEA" in t for t in seen.values())
+    assert any("ZZ-SECRET-GIVER" in t for t in seen.values())   # /api/giver-names
     assert any('"santa"' in t for t in seen.values())
 
 
@@ -169,7 +191,7 @@ def test_an_inactive_protected_person_is_still_protected(client, world):
 # ---------------------------------------------------------------- writing
 HOSTILE = [
     # tries to make a gift protected, or to change a protected one, or to unprotect a person
-    {"title": "pwned", "name": "pwned", "status": "given", "recipient_ids": "KID", "giver_ids": "CASEY",
+    {"title": "pwned", "name": "pwned", "status": "given", "recipient_ids": "KID", "person_ids": "KID", "giver_ids": "CASEY",
      "expected_giver_ids": [], "occasion_id": "O", "protected": False, "price": "1", "plan": "skip",
      "budget_cents": 1, "kind": "other", "date": "2026-12-25"},
     # tries to move a protected gift out from behind the lock
@@ -199,6 +221,8 @@ def test_no_locked_mutation_changes_or_reveals_a_protected_gift(client, world):
                     assert r.status_code < 500, (method, url, r.status_code)
                     assert not leaks(r.get_data(as_text=True)), (method, url)
                     if values.get("gift_id") in world.secret:
+                        assert r.status_code in (404, 423), (method, url, r.status_code)
+                    if values.get("idea_id") in (world.secret_idea, world.taken_idea):
                         assert r.status_code in (404, 423), (method, url, r.status_code)
                     assert protected_state() == before, (method, url, body)
     assert sent > 50
@@ -276,3 +300,66 @@ def test_a_second_owner_must_unlock_for_themselves(client, world, unlock):
     unlock("alex@example.com")
     set_pin(client, PIN, "sam@example.com")
     assert client.get(f"/api/gifts/{world.shared}", headers=auth("sam@example.com")).status_code == 404
+
+
+def _gifts_in(value):
+    """Every dict with a `from_idea` key anywhere in a JSON value: gift JSON, in a list, a board or a group."""
+    if isinstance(value, dict):
+        if "from_idea" in value:
+            yield value
+        for v in value.values():
+            yield from _gifts_in(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _gifts_in(v)
+
+
+def test_every_idea_gift_a_locked_caller_sees_points_to_a_visible_idea(client, world, unlock):
+    """A gift taken from an idea shows whether it came from one (from_idea), and back to ideas and move to ideas
+    answer by it. So while locked, a visible gift with from_idea true must be some visible idea's copy, or a hidden
+    idea would show through it. Unlocked, try each way to hide an idea behind a visible gift taken from it (each is
+    refused); then, locked, every visible gift's answers must follow the visible ideas list alone."""
+    i = world.ids
+    unlock()
+
+    def mk(title, person_ids):
+        return client.post("/api/ideas", json={"title": title, "person_ids": person_ids}, headers=mut()).get_json()["id"]
+
+    def take(idea, pid):
+        return client.post(f"/api/ideas/{idea}/take/{pid}", json={"giver_ids": [i.alex]}, headers=mut()).get_json()
+
+    seen = take(mk("Kite", [i.jordan, i.casey]), i.jordan)["id"]   # a visible idea gift
+    take(mk("Kite A", [i.kid1, i.jordan]), i.jordan)                # taking for Jordan beside a protected tag
+    b = mk("Kite B", [i.jordan, i.riley])
+    take(b, i.jordan)
+    client.patch(f"/api/ideas/{b}", json={"person_ids": [i.jordan, i.riley, i.kid2]}, headers=mut())  # tagging
+    take(mk("Kite C", [i.riley, i.casey]), i.casey)
+    client.patch(f"/api/people/{i.riley}", json={"protected": True}, headers=mut())                  # protecting
+    d = mk("Kite D", [i.jordan, i.casey])
+    d_gift = take(d, i.jordan)["id"]
+    take(d, i.casey)
+    client.patch(f"/api/gifts/{d_gift}", json={"recipient_ids": [i.jordan, i.kid3]}, headers=mut())  # a recipient
+    assert client.post("/api/lock/lock", json={}, headers=mut()).status_code == 200
+
+    copies = {p["gift_id"] for idea in client.get("/api/ideas", headers=auth()).get_json()
+              for p in idea["people"] if p["gift_id"] is not None}
+    assert seen in copies
+    shown = []
+    for url, text in walk_gets(client, world, query=("",)).items():
+        if text.startswith(("{", "[")):
+            shown += [(url, g) for g in _gifts_in(json.loads(text))]
+    for (gid,) in con_rows("SELECT id FROM gifts ORDER BY id"):
+        r = client.get(f"/api/gifts/{gid}", headers=auth())
+        if r.status_code == 200:
+            shown.append((f"/api/gifts/{gid}", r.get_json()))
+    assert any(g["id"] == seen for _, g in shown)
+    for url, g in shown:
+        assert g["from_idea"] == (g["id"] in copies), (url, g["id"], g["title"])
+    for gid in {g["id"] for _, g in shown} - copies:
+        r = client.post(f"/api/gifts/{gid}/back-to-ideas", json={}, headers=mut())
+        assert (r.status_code, r.get_json()) == (400, {"error": "This gift did not come from an idea."}), gid
+        r = client.post(f"/api/gifts/{gid}/to-idea", json={}, headers=mut())
+        assert "came from an idea" not in r.get_data(as_text=True), gid
+    for gid in copies:
+        r = client.post(f"/api/gifts/{gid}/to-idea", json={}, headers=mut())
+        assert (r.status_code, r.get_json()["error"]) == (400, "This gift came from an idea: send it back to ideas instead.")

@@ -17,6 +17,7 @@ import db as database
 import exchanges
 import gifts
 import identity
+import ideas
 import lists
 import lock
 import locations
@@ -344,6 +345,9 @@ def gift_json(row):
         out.pop("santa", None)  # school mode has no Santa, whatever the column says
         out.pop("location_id", None)  # nor hiding places
         out.pop("location_path", None)
+        out.pop("giver_name", None)  # nor typed givers
+    else:
+        out["from_idea"] = ideas.is_idea_gift(db(), row["id"])  # the UI offers Back to ideas for such a gift
     return out
 
 
@@ -365,9 +369,10 @@ def refuse_locked_write(data: dict) -> None:
         return
     if isinstance(data.get("santa"), bool):  # any other value is 400 in gifts; null changes nothing
         raise locked()
-    rids = data.get("recipient_ids")
-    if isinstance(rids, list) and people.protected_ids(db()) & {i for i in rids if isinstance(i, int)}:
-        raise locked()
+    for key in ("recipient_ids", "person_ids"):  # a gift's recipients, an idea's tagged people
+        named = data.get(key)
+        if isinstance(named, list) and people.protected_ids(db()) & {i for i in named if isinstance(i, int)}:
+            raise locked()
 
 
 def refuse_locked_exchange_write(data: dict, gift_id: int | None = None) -> None:
@@ -442,6 +447,112 @@ def person_history(person_id):
                                                          "date": r["occasion_date"]}} for r in rows])
 
 
+@app.get("/api/giver-names")
+@family_only
+def giver_names():
+    """Typed giver names to suggest, most recently used first; a name used only on a hidden gift is left out."""
+    return jsonify(gifts.giver_names(db(), unlocked=unlocked()))
+
+
+# -- ideas (family only). As for gifts: while locked, a protected idea (a protected person tagged, or a copy taken by
+# a protected gift) answers exactly like a missing one (404), and a write may not tag a protected person (423).
+def visible_idea(idea_id):
+    """The idea's JSON, or the same 404 as a missing idea when it is protected and this request is locked."""
+    if not ideas.visible(db(), idea_id, unlocked=unlocked()):
+        raise ApiError(404, "No such idea.")
+    return ideas.get_json(db(), idea_id)
+
+
+@app.get("/api/ideas")
+@family_only
+def ideas_list():
+    """Every idea, or with ?person=<id> those tagged with that person. A protected person's list is empty while locked."""
+    person = request.args.get("person")
+    if person is not None and not (person.isascii() and person.isdigit()):
+        raise ApiError(400, "person must be a person id.")
+    return jsonify(ideas.list_json(db(), unlocked=unlocked(), person_id=None if person is None else int(person)))
+
+
+@app.get("/api/ideas/share")
+@family_only
+def ideas_share():
+    """{text}: the shared ideas still open for each person, to paste to family. ?people=1,2,3 picks the people (a
+    protected one while locked is 423); without it, everyone this request may see."""
+    raw = request.args.get("people")
+    person_ids = None
+    if raw is not None:
+        parts = raw.split(",")
+        if not all(p.isascii() and p.isdigit() for p in parts):
+            raise ApiError(400, "people must be a list of person ids.")
+        person_ids = [int(p) for p in parts]
+    return jsonify(text=ideas.share_text(db(), person_ids, unlocked=unlocked()))
+
+
+@app.post("/api/ideas")
+@family_only
+def ideas_create():
+    data = json_body()
+    refuse_locked_write(data)
+    return jsonify(visible_idea(ideas.create(db(), g.user, data))), 201
+
+
+@app.get("/api/ideas/<int:idea_id>")
+@family_only
+def ideas_get(idea_id):
+    return jsonify(visible_idea(idea_id))
+
+
+@app.patch("/api/ideas/<int:idea_id>")
+@family_only
+def ideas_update(idea_id):
+    """Answers {"deleted": true} when the body leaves the idea with no people (person_ids: [])."""
+    visible_idea(idea_id)
+    data = json_body()
+    refuse_locked_write(data)
+    if ideas.update(db(), idea_id, data):
+        return jsonify(deleted=True)
+    return jsonify(visible_idea(idea_id))
+
+
+@app.delete("/api/ideas/<int:idea_id>")
+@family_only
+def ideas_delete(idea_id):
+    visible_idea(idea_id)
+    ideas.delete(db(), idea_id)
+    return jsonify(ok=True)
+
+
+@app.post("/api/ideas/<int:idea_id>/take/<int:person_id>")
+@family_only
+def ideas_take(idea_id, person_id):
+    """{giver_ids, giver_name?, occasion_id?}: a gift from this person's copy of the idea, 201 with the gift. Works
+    while locked for an idea that is not protected (all its people are then unprotected too)."""
+    visible_idea(idea_id)
+    data = json_body()
+    refuse_locked_write(data)
+    gid = wishlist.take_idea(db(), g.user, idea_id, person_id, data)  # reserves a linked wish
+    return jsonify(gift_json(visible_gift(gid))), 201
+
+
+@app.post("/api/gifts/<int:gift_id>/back-to-ideas")
+@family_only
+def gifts_back_to_ideas(gift_id):
+    """Delete a gift taken from an idea, which reopens that copy."""
+    visible_gift(gift_id)
+    if not ideas.is_idea_gift(db(), gift_id):
+        raise ApiError(400, "This gift did not come from an idea.")
+    wishlist.delete_gift(db(), gift_id)  # gifts.delete, releasing a linked wish's reservation
+    return jsonify(ok=True)
+
+
+@app.post("/api/gifts/<int:gift_id>/to-idea")
+@family_only
+def gifts_to_idea(gift_id):
+    """An unassigned gift becomes an idea for its recipients; 201 with the idea."""
+    visible_gift(gift_id)
+    return jsonify(visible_idea(ideas.to_idea(db(), g.user, gift_id))), 201
+
+
 # -- budgets
 @app.get("/api/occasions/<int:occasion_id>/summary")
 def occasion_summary(occasion_id):
@@ -494,10 +605,12 @@ def person_board(occasion_id, person_id):
 @family_only
 @unlock_required
 def gifts_assign(gift_id):
-    """{giver_ids, expected_giver_ids}: 409 when the givers are no longer the ones the caller saw."""
+    """{giver_ids, expected_giver_ids, giver_name?, expected_giver_name?}: 409 when the givers are no longer the ones
+    the caller saw."""
     visible_gift(gift_id)
-    giver_ids, expected = boards.parse_assign(json_body())
-    wishlist.assign(db(), gift_id, giver_ids, expected)  # boards.assign, and a linked wish reserved or released
+    giver_ids, expected, name, expected_name = boards.parse_assign(json_body())
+    # boards.assign, and a linked wish reserved or released
+    wishlist.assign(db(), gift_id, giver_ids, expected, giver_name=name, expected_giver_name=expected_name)
     return jsonify(gift_json(visible_gift(gift_id)))
 
 
@@ -666,10 +779,10 @@ def wishlist_refresh():
 @unlock_required
 @wishlist_on
 def wishlist_add_wish(occasion_id, person_id, item_id):
-    """Put a wish on the person's board as an unassigned gift linked to it. Nothing is sent to the wishlist."""
+    """Pull a wish over as an idea for the person, linked to it; 201 with the idea. Nothing is sent to the wishlist."""
     json_body()
-    gid = wishlist.add_wish(db(), g.user, occasion_id, person_id, item_id)
-    return jsonify(gift_json(visible_gift(gid))), 201
+    iid = wishlist.add_wish(db(), g.user, occasion_id, person_id, item_id)
+    return jsonify(visible_idea(iid)), 201
 
 
 @app.get("/api/wishlist/aliases")

@@ -4,7 +4,7 @@
 export const ROLE_SUGGESTIONS = ["homeroom", "assistant", "special subject", "administrator"];
 
 // Screens that do not exist in school mode: the server answers 404 for their routes.
-const FAMILY_ONLY_SCREENS = ["board"];
+const FAMILY_ONLY_SCREENS = ["board", "idea", "ideas"];
 
 export const isSchool = me => me?.mode === "school";
 

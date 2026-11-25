@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -184,6 +184,25 @@ def _to_v7(con):
 
 
 MIGRATIONS[7] = _to_v7
+
+
+# Version 8 (ideas and typed givers): an idea is a gift-to-be tagged with one or more people, with no occasion, giver or
+# status; `idea_people` holds one copy per tagged person, and its gift_id is set once someone takes that copy (SET NULL
+# on a deleted gift reopens it). One idea per wishlist item. `gifts.giver_name` is a typed giver for someone with no
+# person row; the column defaults to NULL, so existing gifts keep their data.
+def _to_v8(con):
+    con.execute("CREATE TABLE ideas (id INTEGER PRIMARY KEY, title TEXT NOT NULL, url TEXT, store TEXT, price_cents INTEGER, "
+                "notes TEXT, share INTEGER NOT NULL DEFAULT 0, wishlist_item_id INTEGER, created_by TEXT NOT NULL, "
+                "created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
+    con.execute("CREATE UNIQUE INDEX ideas_wishlist_item ON ideas(wishlist_item_id) WHERE wishlist_item_id IS NOT NULL")
+    con.execute("CREATE TABLE idea_people (idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE, "
+                "person_id INTEGER NOT NULL REFERENCES people(id), "
+                "gift_id INTEGER REFERENCES gifts(id) ON DELETE SET NULL, PRIMARY KEY (idea_id, person_id))")
+    con.execute("CREATE INDEX idea_people_gift ON idea_people(gift_id)")
+    con.execute("ALTER TABLE gifts ADD COLUMN giver_name TEXT")
+
+
+MIGRATIONS[8] = _to_v8
 
 
 def migrate(con):

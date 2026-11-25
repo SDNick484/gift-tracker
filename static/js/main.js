@@ -10,6 +10,7 @@ import { lockApplies, pickScreen } from "./mode.js";
 const SCREENS = {
   "": () => import("./home.js"),
   idea: () => import("./idea.js"),
+  ideas: () => import("./ideas.js"),
   person: () => import("./person.js"),
   gift: () => import("./gift.js"),
   board: () => import("./board.js"),

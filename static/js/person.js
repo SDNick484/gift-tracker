@@ -1,9 +1,13 @@
-// #/person/<id>  One person: this occasion's gifts, the plan and budget editor, then history by occasion.
+// #/person/<id>  One person: this occasion's gifts, their open ideas (each with Take, as on #/ideas), the plan and
+// budget editor, then history by occasion. School mode has no ideas: no list and no "+ Idea".
 import { get, send } from "./api.js";
 import {
-  centsToText, currentOccasion, dollarsToCents, esc, giverLabel, money, personById, renderColor, renderOptions,
+  centsToText, currentOccasion, dollarsToCents, esc, giverText, money, personById, renderColor, renderOptions,
   requireUnlocked, state, toast,
 } from "./core.js";
+import { assignChoices } from "./board.js";
+import { copyState, submitTake, toggleTake } from "./ideas.js";
+import { isSchool } from "./mode.js";
 
 const PLANS = [
   { value: "", label: "Not in this occasion" }, { value: "individual", label: "Individual" },
@@ -13,7 +17,7 @@ const PLANS = [
 // The second line of a gift row: who it is from, and who else receives it.
 export function giftLine(gift, people, personId) {
   const others = gift.recipient_ids.filter(id => id !== personId).map(id => people.find(p => p.id === id)?.name).filter(Boolean);
-  return { from: giverLabel(gift.giver_ids, people), also: others.join(" & ") };
+  return { from: giverText(gift, people), also: others.join(" & ") };
 }
 
 // History grouped by occasion in the order given (newest first), leaving out the occasion shown above it.
@@ -46,6 +50,24 @@ const renderNoGifts = gifts => (gifts.length ? "" : `<p class="empty">Nothing ye
 const renderHistoryGroup = (group, people, personId) => `<section class="col"><h3>${esc(group.name)}</h3><ul class="rows">${renderGifts(group.gifts, people, personId)}</ul></section>`;
 const renderHistory = (groups, people, personId) => groups.map(x => renderHistoryGroup(x, people, personId)).join("");
 
+// The person's open ideas, each with "Take…" opening the take form in its slot.
+const renderIdeaRow = (idea, personId) => `<li class="row">
+    <div class="main"><div class="name">${esc(idea.title)}</div><div class="line">${esc(idea.store ?? "")}</div></div>
+    <div class="amt">${esc(money(idea.price_cents))}</div>
+    <div class="row-actions"><button type="button" class="btn small" data-take="${esc(idea.id)}" data-person="${esc(personId)}">Take…</button></div>
+    <div class="slot" data-take-slot="${esc(idea.id)}-${esc(personId)}"></div>
+  </li>`;
+const renderIdeaRows = (list, personId) => list.map(i => renderIdeaRow(i, personId)).join("");
+const renderNameOption = n => `<option value="${esc(n)}"></option>`;
+const renderNameOptions = names => names.map(renderNameOption).join("");
+const renderIdeas = (list, personId, names, school) => {
+  const open = school ? [] : list.filter(i => copyState(i, personId) === "open");
+  return open.length
+    ? `<h3>Ideas</h3><ul class="rows">${renderIdeaRows(open, personId)}</ul><datalist id="giver-names">${renderNameOptions(names)}</datalist>`
+    : "";
+};
+const renderAddIdea = (person, school) => (school ? "" : `<a class="btn primary" href="#/idea?for=${esc(person.id)}">+ Idea</a>`);
+
 const renderBoardLink = person => (person.protected ? `<a class="btn" href="#/board/${esc(person.id)}">Board</a>` : "");
 const renderInactive = person => (person.active ? "" : ` <span class="badge">inactive</span>`);
 const renderSubline = (person, groupName) => esc([groupName, person.household].filter(Boolean).join(" · "));
@@ -64,11 +86,11 @@ export function findEntry(summary, personId) {
 
 const renderTotals = entry => (entry ? ` · ${esc(totalsText(entry))}` : "");
 
-export const renderPage = (person, groupName, occasion, plan, entry, gifts, history, people) => `
+export const renderPage = (person, groupName, occasion, plan, entry, gifts, history, people, { ideas = [], names = [], school = false } = {}) => `
   <a class="back" href="#/">&larr; Home</a>
   <section class="card colored"${renderColor(person.color)}>
     <div class="head"><div><h2>${esc(person.name)}${renderInactive(person)}</h2><span class="sub">${renderSubline(person, groupName)}</span></div>
-      <div class="actions">${renderBoardLink(person)}<a class="btn primary" href="#/idea?for=${esc(person.id)}">+ Idea</a></div></div>
+      <div class="actions">${renderBoardLink(person)}${renderAddIdea(person, school)}</div></div>
     <p class="muted small">${esc(occasion.name)}${renderTotals(entry)}</p>
   </section>
   <div class="cols wide-left">
@@ -76,6 +98,7 @@ export const renderPage = (person, groupName, occasion, plan, entry, gifts, hist
       <h3>${esc(occasion.name)}</h3>
       <ul class="rows">${renderGifts(gifts, people, person.id)}</ul>
       ${renderNoGifts(gifts)}
+      ${renderIdeas(ideas, person.id, names, school)}
     </div>
     <div class="col">
       <form id="plan" class="card fields">
@@ -104,18 +127,37 @@ export async function render(ctx) {
     view.innerHTML = renderNoOccasion();
     return;
   }
-  const [gifts, history, summary, groups] = await Promise.all([
+  const school = isSchool(state.me);
+  const none = Promise.resolve([]);
+  const [gifts, history, summary, groups, ideas, households, names] = await Promise.all([
     get(`/api/occasions/${occasion.id}/people/${person.id}/gifts`),
     get(`/api/people/${person.id}/history`),
     get(`/api/occasions/${occasion.id}/summary`),
     get("/api/groups"),
+    school ? none : get(`/api/ideas?person=${person.id}`),
+    school ? none : get("/api/households"),
+    school ? none : get("/api/giver-names"),
   ]);
   if (!ctx.alive()) return;
   const plan = occasion.people.find(p => p.person_id === person.id) ?? null;
   const groupName = groups.find(g => g.id === person.group_id)?.name ?? "";
   view.innerHTML = renderPage(person, groupName, occasion, plan, findEntry(summary, person.id), gifts,
-    groupByOccasion(history.gifts, occasion.id), state.people);
+    groupByOccasion(history.gifts, occasion.id), state.people, { ideas, names, school });
   wirePlan(ctx, view.querySelector("#plan"), occasion, person, plan);
+  if (!school) wireIdeas(ctx, view, assignChoices(households, state.people));
+}
+
+function wireIdeas(ctx, view, choices) {
+  view.addEventListener("click", e => {
+    const take = e.target.closest("[data-take]");
+    if (take) toggleTake(view, take, choices);
+    else if (e.target.closest("[data-cancel-take]")) e.target.closest(".slot").innerHTML = "";
+  });
+  view.addEventListener("submit", async e => {
+    if (e.target.dataset.form !== "take") return; // the plan form has its own listener
+    e.preventDefault();
+    if (await submitTake(e.target)) ctx.rerender();
+  });
 }
 
 function wirePlan(ctx, form, occasion, person, plan) {

@@ -1,4 +1,4 @@
-// #/  Home: one occasion at a glance. The occasion picker with days until, + Idea, the protected section (one
+// #/  Home: one occasion at a glance. The occasion picker with days until, + Idea and Ideas, the protected section (one
 // locked row while locked, one row per protected person once unlocked), then every group with each person's
 // plan, headline and spent of budget.
 import { get } from "./api.js";
@@ -90,7 +90,7 @@ export const renderHome = (summary, occasions, anyProtected, counts = null) => `
       <span class="countdown">${esc(daysLabel(summary.days_until))}</span>
     </div>
   </div>
-  <a class="btn primary big-add" href="#/idea">${renderIcon("plus")} Idea</a>
+  <div class="home-add"><a class="btn primary big-add" href="#/idea">${renderIcon("plus")} Idea</a><a class="btn" href="#/ideas">Ideas</a></div>
   ${renderCountsRow(counts)}
   ${renderExchangesSection(summary.exchanges)}
   ${renderProtectedSection(summary, anyProtected)}

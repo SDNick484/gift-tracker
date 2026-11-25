@@ -1,9 +1,12 @@
 // #/gift/<id>  Gift detail: title, recipients, givers, status steps as buttons, Santa (only when the server sent
 // the flag, which it does only while unlocked, and only for a gift from an owner), link, store, price, notes.
-// Status and Santa apply the moment they are tapped; the fields below save together.
+// Status and Santa apply the moment they are tapped; the fields below save together. In a family instance From also
+// takes a typed name ("Someone else", with the names used before as suggestions), a gift taken from an idea can go
+// back to ideas, and an old gift with no giver can move to ideas. School gift JSON has neither `giver_name` nor
+// `from_idea`, so none of that is drawn there.
 import { get, send } from "./api.js";
 import {
-  centsToText, esc, giverLabel, isUnlocked, money, renderChecked, renderDisabled, renderOptions, state, statusSteps, toast,
+  centsToText, esc, giverText, isUnlocked, money, renderChecked, renderDisabled, renderOptions, state, statusSteps, toast,
 } from "./core.js";
 import { isSchool } from "./mode.js";
 
@@ -20,15 +23,18 @@ export function pickList(people, selectedIds, { unlocked, recipients }) {
     || (p.active && (unlocked || !p.protected) && !(recipients && p.is_user)));
 }
 
-// The PATCH body from the form's values. Throws an Error with a sentence to show when something is missing.
+// The PATCH body from the form's values. Throws an Error with a sentence to show when something is missing. The typed
+// giver is sent only when the form has the box (never in school mode); a cleared box clears it (null).
 export function buildPatch(f) {
   const title = f.title.trim();
   if (!title) throw new Error("A gift needs a title.");
   if (!f.recipientIds.length) throw new Error("Pick at least one recipient.");
-  return {
+  const body = {
     title, url: f.url.trim(), store: f.store.trim(), price: f.price.trim(), notes: f.notes.trim(),
     recipient_ids: f.recipientIds, giver_ids: f.giverIds,
   };
+  if (typeof f.giverName === "string") body.giver_name = f.giverName.trim() || null;
+  return body;
 }
 
 // ---------------------------------------------------------------- order card (seller, ship-to, dates, hiding place)
@@ -113,19 +119,35 @@ const renderTold = gift => (gift.track === "theirs" && gift.told_at ? `<p class=
 const renderCheck = (name, p, on) => `<label class="check"><input type="checkbox" name="${esc(name)}" value="${esc(p.id)}"${renderChecked(on)}> ${esc(p.name)}</label>`;
 const renderChecks = (name, list, selected) => list.map(p => renderCheck(name, p, selected.includes(p.id))).join("");
 
+// The typed giver box (family gift JSON has the `giver_name` key) and the suggestions it offers.
+const renderNameOption = n => `<option value="${esc(n)}"></option>`;
+const renderNameOptions = names => names.map(renderNameOption).join("");
+const renderGiverName = (gift, names) => (gift.giver_name === undefined ? "" : `
+        <label class="field"><span>Someone else</span><input name="giver_name" type="text" maxlength="80" list="giver-names" value="${esc(gift.giver_name ?? "")}" placeholder="A name"></label>
+        <datalist id="giver-names">${renderNameOptions(names)}</datalist>`);
+
+// Back to ideas for a gift taken from an idea; Move to ideas for an old gift with nobody giving it, still at the idea
+// status (the server refuses one further along: an idea keeps no status or order). Family only.
+const renderMoves = gift => {
+  if (typeof gift.from_idea !== "boolean") return "";
+  if (gift.from_idea) return `<button class="btn" type="button" id="back-to-ideas">Back to ideas</button>`;
+  return gift.giver_ids.length || gift.giver_name || gift.status !== "idea"
+    ? "" : `<button class="btn" type="button" id="to-idea">Move to ideas</button>`;
+};
+
 const renderSantaBox = gift => (typeof gift.santa === "boolean"
   ? `<label class="check"><input type="checkbox" id="santa"${renderChecked(gift.santa)}${renderDisabled(!gift.canSanta)}> From Santa <span class="muted small">(a gift from us only)</span></label>`
   : "");
 
-export function renderPage(gift, people, occasionName, unlocked, places = null) {
+export function renderPage(gift, people, occasionName, unlocked, places = null, names = []) {
   const view = { ...gift, canSanta: canSanta(gift, people) };
   const recipients = pickList(people, gift.recipient_ids, { unlocked, recipients: true });
   const givers = pickList(people, gift.giver_ids, { unlocked, recipients: false });
-  const names = ids => ids.map(id => people.find(p => p.id === id)?.name).filter(Boolean).join(" & ");
+  const nameList = ids => ids.map(id => people.find(p => p.id === id)?.name).filter(Boolean).join(" & ");
   return `
   <a class="back" href="${esc(state.prev || "#/")}">&larr; Back</a>
   <div class="head"><div><h2>${esc(gift.title)}</h2>
-    <span class="sub">${esc(occasionName)} · to ${esc(names(gift.recipient_ids))}${renderFromSub(gift, people)}</span></div>
+    <span class="sub">${esc(occasionName)} · to ${esc(nameList(gift.recipient_ids))}${renderFromSub(gift, people)}</span></div>
     <span class="amt">${esc(money(gift.price_cents))}</span></div>
   <div class="cols">
     <div class="col">
@@ -141,7 +163,7 @@ export function renderPage(gift, people, occasionName, unlocked, places = null) 
       <form id="fields" class="card fields">
         <label class="field"><span>Title</span><input name="title" type="text" maxlength="200" value="${esc(gift.title)}" required></label>
         <div class="field"><span>For</span><div class="check-list">${renderChecks("recipient", recipients, gift.recipient_ids)}</div></div>
-        <div class="field"><span>From</span><div class="check-list">${renderChecks("giver", givers, gift.giver_ids)}</div></div>
+        <div class="field"><span>From</span><div class="check-list">${renderChecks("giver", givers, gift.giver_ids)}</div></div>${renderGiverName(gift, names)}
         <label class="field"><span>Link</span><input name="url" type="url" inputmode="url" maxlength="2000" value="${esc(gift.url ?? "")}"></label>
         <div class="two">
           <label class="field"><span>Store</span><input name="store" type="text" maxlength="200" value="${esc(gift.store ?? "")}"></label>
@@ -149,12 +171,12 @@ export function renderPage(gift, people, occasionName, unlocked, places = null) 
         </div>
         <label class="field"><span>Notes</span><textarea name="notes" maxlength="2000">${esc(gift.notes ?? "")}</textarea></label>
         <p class="form-error" id="formError" role="alert"></p>
-        <div class="actions"><button class="btn primary" type="submit">Save</button><span class="spacer"></span><button class="btn danger" type="button" id="delete">Delete</button></div>
+        <div class="actions"><button class="btn primary" type="submit">Save</button><span class="spacer"></span>${renderMoves(gift)}<button class="btn danger" type="button" id="delete">Delete</button></div>
       </form>
     </div>
   </div>`;
 }
-const renderFromSub = (gift, people) => (gift.giver_ids.length ? ` · from ${esc(giverLabel(gift.giver_ids, people))}` : "");
+const renderFromSub = (gift, people) => (giverText(gift, people) ? ` · from ${esc(giverText(gift, people))}` : "");
 
 const renderNotFound = () => `<div class="notice"><p>No such gift.</p><p><a class="btn" href="#/">Home</a></p></div>`;
 
@@ -162,11 +184,12 @@ const checked = (form, name) => [...form.querySelectorAll(`input[name="${name}"]
 
 export async function render(ctx) {
   const { view } = ctx;
-  let gift, addresses, locations;
+  let gift, addresses, locations, names;
   const school = isSchool(state.me);
   try {
-    [gift, addresses, locations] = await Promise.all([get(`/api/gifts/${Number(ctx.parts[1])}`), get("/api/addresses"),
-      school ? Promise.resolve([]) : get("/api/locations")]);
+    [gift, addresses, locations, names] = await Promise.all([get(`/api/gifts/${Number(ctx.parts[1])}`), get("/api/addresses"),
+      school ? Promise.resolve([]) : get("/api/locations"),
+      school ? Promise.resolve([]) : get("/api/giver-names").catch(() => [])]); // suggestions only: never in the way
   } catch (e) {
     if (e.status !== 404) throw e;
     view.innerHTML = renderNotFound();
@@ -175,7 +198,7 @@ export async function render(ctx) {
   if (!ctx.alive()) return;
   const occasionName = state.occasions.find(o => o.id === gift.occasion_id)?.name ?? "";
   const places = { addresses, locations, school };
-  view.innerHTML = renderPage(gift, state.people, occasionName, isUnlocked(), places);
+  view.innerHTML = renderPage(gift, state.people, occasionName, isUnlocked(), places, Array.isArray(names) ? names : []);
   const people = state.people;
 
   const orderBox = view.querySelector("#orderBox");
@@ -251,7 +274,7 @@ export async function render(ctx) {
       body = buildPatch({
         title: form.elements.title.value, url: form.elements.url.value, store: form.elements.store.value,
         price: form.elements.price.value, notes: form.elements.notes.value,
-        recipientIds: checked(form, "recipient"), giverIds: checked(form, "giver"),
+        recipientIds: checked(form, "recipient"), giverIds: checked(form, "giver"), giverName: form.elements.giver_name?.value,
       });
       await send("PATCH", `/api/gifts/${gift.id}`, body);
     } catch (err) {
@@ -273,4 +296,19 @@ export async function render(ctx) {
     toast("Deleted");
     location.hash = state.prev || "#/";
   });
+
+  // Back to ideas deletes the gift and reopens the idea's copy; Move to ideas turns the gift into an idea.
+  const move = async (path, done) => {
+    formError.textContent = "";
+    try {
+      await send("POST", `/api/gifts/${gift.id}/${path}`, {});
+    } catch (err) {
+      formError.textContent = err.locked ? "Locked. Unlock, then try again." : err.message;
+      return;
+    }
+    toast(done);
+    location.hash = state.prev || "#/";
+  };
+  view.querySelector("#back-to-ideas")?.addEventListener("click", () => move("back-to-ideas", "Back in ideas"));
+  view.querySelector("#to-idea")?.addEventListener("click", () => move("to-idea", "Moved to ideas"));
 }
