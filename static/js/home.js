@@ -64,8 +64,9 @@ const renderEmpty = summary => (summary.groups.length || summary.protected.peopl
   ? ""
   : `<p class="empty">No one is in this occasion yet. Add people in <a href="#/settings">Settings</a>.</p>`);
 
-// "Not here yet 3 · To wrap 9 · Where is it?": links to the three lists. Where is it? has no number, as in the spec.
-export const renderCounts = c => `<p class="counts"><a href="#/lists/pending">Not here yet ${esc(c.pending)}</a> · <a href="#/lists/to-wrap">To wrap ${esc(c.to_wrap)}</a> · <a href="#/lists/where">Where is it?</a></p>`;
+// "Not here yet 3 · To wrap 9 · Where is it? · Ideas": links to the three lists and the ideas. Where is it? has no
+// number, as in the spec.
+export const renderCounts = c => `<p class="counts"><a href="#/lists/pending">Not here yet ${esc(c.pending)}</a> · <a href="#/lists/to-wrap">To wrap ${esc(c.to_wrap)}</a> · <a href="#/lists/where">Where is it?</a> · <a href="#/ideas">Ideas</a></p>`;
 const renderCountsRow = c => (c ? renderCounts(c) : "");
 
 // The occasion's exchanges, one row each: name, budget, date and how many draws are over budget. Nothing when there

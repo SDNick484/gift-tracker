@@ -274,3 +274,12 @@ code.token { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, m
 /* gift exchanges */
 .exchange details { margin-top: 6px; }
 .exchange summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+
+/* ideas: one card per idea, a row per tagged person's copy */
+.idea > p { margin: 0; }
+.idea .idea-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.idea .group-head .title { overflow-wrap: anywhere; min-width: 0; }
+.idea .group-head .title a { color: inherit; }
+.idea .group-head .amt { font-variant-numeric: tabular-nums; font-weight: 650; }
+.idea details { margin-top: 2px; }
+.idea summary { cursor: pointer; font-weight: 600; padding: 8px 0; }

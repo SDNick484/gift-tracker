@@ -64,6 +64,12 @@ export function giverLabel(giverIds, people) {
   return givers.map(p => p.name).join(" & ");
 }
 
+// Who gives a gift: the label of its giver people, then its typed giver name (gift JSON `giver_name`), joined by
+// " & ". "" for no giver at all. Plain text: escape it where it goes into markup.
+export function giverText(gift, people) {
+  return [giverLabel(gift.giver_ids ?? [], people), (gift.giver_name ?? "").trim()].filter(Boolean).join(" & ");
+}
+
 // ---------------------------------------------------------------- markup helpers (every one returns escaped markup)
 const HEX = /^#[0-9a-fA-F]{6}$/;
 

@@ -4,14 +4,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ApiError, events, get, send } from "../static/js/api.js";
-import { backTarget, forChoices, fromChoices, render as renderIdeaScreen } from "../static/js/idea.js";
+import { backTarget, forChoices, ideaBody, render as renderIdeaScreen } from "../static/js/idea.js";
 import { findEntry, giftLine, groupByOccasion, renderPage, totalsText } from "../static/js/person.js";
 import { buildPatch, canSanta, pickList, renderPage as renderGiftPage, renderSteps, stepClass } from "../static/js/gift.js";
 import { assignBody, assignChoices, countGifts, evennessLine, renderBoard, splitLine } from "../static/js/board.js";
 import { groupPayload, occasionPayload, personPayload, pinPayload, renderOccasionEdit, renderPersonForm, renderSettings, visibleHouseholds } from "../static/js/settings.js";
 import { idleExpired, nextEntry, renderNoPin, renderPad } from "../static/js/lock.js";
 import { amountText, occasionChoices, planLabel, renderHome } from "../static/js/home.js";
-import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, money, parseHash, statusSteps } from "../static/js/core.js";
+import { applyColors, centsToText, daysLabel, dollarsToCents, esc, giverLabel, giverText, money, parseHash, statusSteps } from "../static/js/core.js";
 
 test("esc escapes the five HTML characters", () => {
   assert.equal(esc(`<a href="x">'&`), "&lt;a href=&quot;x&quot;&gt;&#39;&amp;");
@@ -189,24 +189,29 @@ test("idea: For lists the most recently used first and leaves out the owners", (
   assert.deepEqual(forChoices(people, [5]), [{ value: 5, label: "Jordan" }, { value: 3, label: "Pat" }, { value: 4, label: "Lee" }]);
 });
 
-test("idea: From offers me first, the other owner, then both (the default)", () => {
-  const owners = [{ id: 1, name: "Alex" }, { id: 2, name: "Sam" }];
-  assert.deepEqual(fromChoices(owners, 2), [
-    { value: "2", label: "Sam (me)", ids: [2] }, { value: "1", label: "Alex", ids: [1] }, { value: "1,2", label: "Both", ids: [1, 2] }]);
-  assert.deepEqual(fromChoices(owners, null).map(c => c.label), ["Alex", "Sam", "Both"]);
-  assert.deepEqual(fromChoices([owners[0]], 1), [{ value: "1", label: "Alex (me)", ids: [1] }]);
-});
-
 test("idea: Save returns to where the user came from, never to the idea form itself", () => {
   assert.equal(backTarget("#/person/4"), "#/person/4");
   assert.equal(backTarget("#/idea?for=3"), "#/");
   assert.equal(backTarget(""), "#/");
 });
 
-test("idea: with no occasion there is nothing to save into", async () => {
+test("idea: with nobody to tag there is nothing to save; an idea needs no occasion", async () => {
   const view = { innerHTML: "" };
   await renderIdeaScreen({ view, query: {}, alive: () => true });
-  assert.ok(view.innerHTML.includes("Create an occasion first."));
+  assert.ok(view.innerHTML.includes("Add the people you buy for first.") && !view.innerHTML.includes("occasion"));
+});
+
+// A form stand-in: named fields, and the For check boxes that are checked.
+const ideaForm = (fields, checkedIds) => ({
+  elements: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, typeof v === "boolean" ? { checked: v } : { value: v }])),
+  querySelectorAll: sel => (assert.equal(sel, 'input[name="for"]:checked'), checkedIds.map(id => ({ value: String(id) }))),
+});
+
+test("idea: the body is an idea for every checked person, blank link and store left out, share off", () => {
+  assert.deepEqual(ideaBody(ideaForm({ what: "  Kite ", url: " ", store: "", share: false }, [3, 5])),
+    { title: "Kite", person_ids: [3, 5], share: false });
+  assert.deepEqual(ideaBody(ideaForm({ what: "Kite", url: " https://example.com/kite ", store: " Toy Shop ", share: true }, [4])),
+    { title: "Kite", person_ids: [4], url: "https://example.com/kite", store: "Toy Shop", share: true });
 });
 
 // ---------------------------------------------------------------- person.js
@@ -471,6 +476,8 @@ test("school: pickScreen swaps home and drops the board only in school mode", ()
   assert.equal(pickScreen("nope", family, school, {}), null);
   assert.equal(pickScreen("", family, school, { mode: "school" }), "S-home");
   assert.equal(pickScreen("board", family, school, { mode: "school" }), null);
+  assert.equal(pickScreen("ideas", { ...family, ideas: "F-ideas" }, school, { mode: "school" }), null);
+  assert.equal(pickScreen("idea", { ...family, idea: "F-idea" }, school, { mode: "school" }), null);
   assert.equal(pickScreen("gift", family, school, { mode: "school" }), "F-gift");
   assert.equal(pickScreen("nope", family, school, { mode: "school" }), null);
 });
@@ -720,7 +727,7 @@ const pendingGift = (extra = {}) => ({ id: 7, title: "Camera", status: "ordered"
 test("lists: the counts row names the three lists, links them and gives Where is it? no number", () => {
   const html = renderCounts({ pending: 3, to_wrap: 9 });
   assert.ok(html.includes('<a href="#/lists/pending">Not here yet 3</a>') && html.includes('<a href="#/lists/to-wrap">To wrap 9</a>'));
-  assert.ok(html.includes('<a href="#/lists/where">Where is it?</a>'));
+  assert.ok(html.includes('<a href="#/lists/where">Where is it?</a>') && html.includes('<a href="#/ideas">Ideas</a>'));
   const summary = { occasion: { id: 1 }, days_until: 3, groups: [], protected: { locked: true, people: [] } };
   assert.ok(!renderHome(summary, [{ id: 1, name: "X", archived: false }], false).includes('class="counts"'), "no counts given: the old home");
   const home = renderHome(summary, [{ id: 1, name: "X", archived: false }], false, { pending: 0, to_wrap: 2 });
@@ -1221,4 +1228,131 @@ test("wishlist: a board without the link renders as it did", () => {
   const html = renderBoard(board(), "Christmas", assignChoices(households, ppl5));
   assert.ok(!html.includes("wishlist") && !html.includes("Wishlist") && !html.includes("disabled") && !html.includes("data-wish"));
   assert.equal((html.match(/class="assign"/g) ?? []).length, 3);
+});
+
+// ---------------------------------------------------------------- ideas.js
+import { copyState, editBody, filterIdeas, kidsIds, renderIdeas, renderIdeasPage, shareQuery, takeBody } from "../static/js/ideas.js";
+
+const ideaPeople = [{ id: 1, name: "Alex", is_user: true, active: true }, { id: 3, name: "Pat", active: true, color: "#1f4d3a" },
+  { id: 7, name: "Riley", active: true, protected: true }, { id: 8, name: "Casey", active: false, protected: true },
+  { id: 9, name: "Jordan", active: true, protected: true }];
+const copy = (person_id, over = {}) => ({ person_id, state: "open", gift_id: null, occasion_id: null, held_by: null, ...over });
+const anIdea = (over = {}) => ({ id: 4, title: "Kite", url: "https://example.com/kite", store: "Toy Shop", price_cents: 1999, notes: null,
+  share: false, wishlist_item_id: null, created_by: "alex@example.com", updated_at: 1800000000, people: [copy(3), copy(7)], ...over });
+
+test("core: giverText is the people's label and the typed name joined by ' & '", () => {
+  assert.equal(giverText({ giver_ids: [], giver_name: "Uncle <b>" }, ideaPeople), "Uncle <b>");
+  assert.equal(giverText({ giver_ids: [3], giver_name: "Uncle Casey" }, ideaPeople), "Pat & Uncle Casey");
+  assert.equal(giverText({ giver_ids: [3], giver_name: null }, ideaPeople), "Pat");
+  assert.equal(giverText({ giver_ids: [3] }, ideaPeople), "Pat");
+  assert.equal(giverText({ giver_ids: [] }, ideaPeople), "");
+});
+
+test("ideas: copyState reads each person's copy", () => {
+  const i = anIdea({ people: [copy(3), copy(7, { state: "taken", gift_id: 12, occasion_id: 2 }), copy(9, { state: "held", held_by: "Grandma" })] });
+  assert.equal(copyState(i, 3), "open");
+  assert.equal(copyState(i, 7), "taken");
+  assert.equal(copyState(i, 9), "held");
+  assert.equal(copyState(i, 99), null, "not tagged: no copy");
+});
+
+test("ideas: filterIdeas keeps the ideas tagged with that person; null keeps all", () => {
+  const list = [anIdea({ id: 1, people: [copy(3)] }), anIdea({ id: 2, people: [copy(7), copy(3)] }), anIdea({ id: 3, people: [copy(9)] })];
+  assert.deepEqual(filterIdeas(list, null).map(i => i.id), [1, 2, 3]);
+  assert.deepEqual(filterIdeas(list, 3).map(i => i.id), [1, 2]);
+  assert.deepEqual(filterIdeas(list, 9).map(i => i.id), [3]);
+  assert.deepEqual(filterIdeas(list, 5), []);
+});
+
+test("ideas: the kids are the active protected people; the share query names them", () => {
+  assert.deepEqual(kidsIds(ideaPeople), [7, 9]);
+  assert.deepEqual(kidsIds([{ id: 1, active: true }]), []);
+  assert.equal(shareQuery(null), "/api/ideas/share");
+  assert.equal(shareQuery([7, 9]), "/api/ideas/share?people=7,9");
+});
+
+test("ideas: the take body sends the chosen givers, the typed name when there is one, and the occasion", () => {
+  assert.deepEqual(takeBody("1,2", "  ", "5"), { giver_ids: [1, 2], occasion_id: 5 });
+  assert.deepEqual(takeBody("", " Uncle Casey ", "5"), { giver_ids: [], giver_name: "Uncle Casey", occasion_id: 5 });
+  assert.deepEqual(takeBody("3", "Aunt Jo", ""), { giver_ids: [3], giver_name: "Aunt Jo" });
+});
+
+test("ideas: the edit body sends every field, so a cleared one is cleared", () => {
+  assert.deepEqual(editBody(ideaForm({ title: " Kite ", url: "", store: " Shop ", price: " 19.99 ", notes: "" }, [3, 7])),
+    { title: "Kite", url: "", store: "Shop", price: "19.99", notes: "", person_ids: [3, 7] });
+});
+
+test("ideas: each copy says open, taken (with the occasion) or held (with the holder); only open ones can be taken", () => {
+  const i = anIdea({ people: [copy(3), copy(7, { state: "taken", gift_id: 12, occasion_id: 2 }), copy(9, { state: "held", held_by: "Grandma" })] });
+  const html = renderIdeas([i], ideaPeople, [{ id: 2, name: "Christmas 2026" }]);
+  assert.ok(html.includes("Christmas 2026") && html.includes('href="#/gift/12"'));
+  assert.ok(html.includes("on the wishlist: Grandma"));
+  assert.equal((html.match(/data-take=/g) ?? []).length, 1);
+  assert.ok(html.includes('data-take="4" data-person="3"') && html.includes("Take for Pat…"));
+  assert.ok(html.includes('data-color="#1f4d3a"') && html.includes('href="https://example.com/kite"') && html.includes("$19.99"));
+  assert.ok(html.includes('data-share="4"') && !/data-share="4"[^>]* checked/.test(html), "share off");
+  assert.ok(/data-share="4"[^>]* checked/.test(renderIdeas([anIdea({ share: true })], ideaPeople)), "share on");
+  assert.ok(html.includes('data-delete="4"') && html.includes('data-form="idea-edit"'));
+});
+
+test("ideas: titles, names, stores, notes and holders are escaped; a bad link is not a link", () => {
+  const evil = anIdea({ title: "<b>Kite</b>", store: "<i>S</i>", notes: "<script>x</script>", url: "javascript:alert(1)",
+    people: [copy(3, { state: "held", held_by: "<b>Gran</b>" })] });
+  const html = renderIdeas([evil], ideaPeople.map(p => (p.id === 3 ? { ...p, name: "<b>Pat</b>" } : p)));
+  assert.ok(!/<b>|<i>|<script/.test(html), html);
+  assert.ok(html.includes("&lt;b&gt;Kite&lt;/b&gt;") && html.includes("&lt;b&gt;Gran&lt;/b&gt;"));
+  assert.ok(!html.includes('href="javascript:'));
+  assert.ok(renderIdeas([], ideaPeople).includes("No ideas yet."));
+});
+
+test("ideas: the page has the person filter, the copy buttons and a datalist of names", () => {
+  const html = renderIdeasPage({ ideas: [anIdea()], people: ideaPeople, occasions: [], personId: 3, names: ["Uncle <b>"] });
+  assert.ok(html.includes('id="idea-person"') && html.includes('<option value="3" selected>Pat</option>'));
+  assert.ok(html.includes('data-copy="person"') && html.includes('data-copy="kids"') && html.includes('data-copy="everyone"'));
+  assert.ok(html.includes('<datalist id="giver-names"><option value="Uncle &lt;b&gt;"></option></datalist>'));
+  assert.ok(html.includes('href="#/idea?for=3"'));
+  const all = renderIdeasPage({ ideas: [], people: [ideaPeople[0], ideaPeople[1]], occasions: [], personId: null, names: [] });
+  assert.ok(!all.includes('data-copy="person"') && !all.includes('data-copy="kids"') && all.includes('data-copy="everyone"'));
+  assert.ok(all.includes('href="#/idea"'));
+});
+
+import { render as renderIdeasScreen } from "../static/js/ideas.js";
+
+test("ideas screen: loads ideas, households and names; Copy list and Take send what they should", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: init.method, url, body: init.body ? JSON.parse(init.body) : undefined });
+    const data = url === "/api/ideas" ? [anIdea()] : url === "/api/households" ? [{ label: "Us", person_ids: [1] }]
+      : url === "/api/giver-names" ? ["Aunt Jo"] : url.startsWith("/api/ideas/share") ? { text: "Pat\n- Kite" } : { id: 50 };
+    return { ok: true, status: init.method === "POST" ? 201 : 200, json: async () => data };
+  };
+  const toasts = [];
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }), body: { append(m) { toasts.push(m.textContent); } } };
+  const copied = [];
+  Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async t => copied.push(t) } }, configurable: true });
+  Object.assign(state, { me: { unlocked: true }, people: ideaPeople, occasions: [{ id: 2, name: "Christmas 2026", archived: false }], occasionId: 2 });
+  const handlers = {};
+  const view = { innerHTML: "", addEventListener: (t, f) => { handlers[t] = f; }, querySelector: () => ({}) };
+  let redraws = 0;
+  await renderIdeasScreen({ view, query: { person: "3" }, alive: () => true, rerender: () => { redraws++; } });
+  assert.deepEqual(calls.map(c => c.url), ["/api/ideas", "/api/households", "/api/giver-names"]);
+  assert.ok(view.innerHTML.includes("Kite") && view.innerHTML.includes('data-copy="person"'));
+
+  const button = dataset => ({ closest: sel => (sel === "[data-copy]" && dataset.copy ? { dataset } : null) });
+  await handlers.click({ target: button({ copy: "kids" }) });
+  await handlers.click({ target: button({ copy: "person" }) });
+  assert.deepEqual(calls.slice(3).map(c => c.url), ["/api/ideas/share?people=7,9", "/api/ideas/share?people=3"]);
+  assert.deepEqual(copied, ["Pat\n- Kite", "Pat\n- Kite"]);
+
+  const error = { textContent: "" };
+  const form = { dataset: { form: "take", idea: "4", person: "3" }, elements: { giver: { value: "" }, giver_name: { value: " Aunt Jo " }, occasion: { value: "2" } },
+    querySelector: sel => (sel === ".form-error" ? error : { disabled: false }) };
+  await handlers.submit({ preventDefault() {}, target: form });
+  assert.deepEqual(calls.at(-1), { method: "POST", url: "/api/ideas/4/take/3", body: { giver_ids: [], giver_name: "Aunt Jo", occasion_id: 2 } });
+  assert.equal(redraws, 1);
+  form.elements.giver_name.value = "";
+  const before = calls.length;
+  await handlers.submit({ preventDefault() {}, target: form });
+  assert.equal(calls.length, before, "no giver: nothing sent");
+  assert.equal(error.textContent, "Say who is giving it.");
 });

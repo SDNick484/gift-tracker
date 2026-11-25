@@ -194,7 +194,7 @@ export const renderBoard = (board, occasionName, choices, people = []) => {
 };
 
 // Puts `text` on the clipboard; when the browser will not allow that, shows it selected in a read-only box.
-async function copyList(text, box) {
+export async function copyList(text, box) {
   try {
     await navigator.clipboard.writeText(text);
     toast("Copied");
