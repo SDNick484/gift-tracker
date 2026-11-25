@@ -647,3 +647,19 @@ def test_school_mode_take_share_and_moves_404(client, ids, monkeypatch):
         r = client.open(url, method=method, json={"giver_ids": [ids.alex]}, headers=mut())
         assert (r.status_code, r.get_json()) == (404, missing), (method, url)
     assert con_rows("SELECT COUNT(*) FROM gifts") == [(1,)]
+
+
+# ---------------------------------------------------------------- from_idea on gift JSON (the UI's Back to ideas)
+def test_gift_json_says_whether_it_came_from_an_idea(client, ids, unlock, monkeypatch):
+    unlock()
+    idea = mk_idea(client, "Bracelet", [ids.kid1])["id"]
+    taken = take(client, idea, ids.kid1, giver_ids=[ids.alex]).get_json()
+    assert taken["from_idea"] is True
+    plain = mk_gift(client, ids.o, "Mug", to=[ids.kid1])
+    assert client.get(f"/api/gifts/{plain}", headers=auth()).get_json()["from_idea"] is False
+    assert client.get(f"/api/gifts/{taken['id']}", headers=auth()).get_json()["from_idea"] is True
+    board = client.get(f"/api/occasions/{ids.o}/board/{ids.kid1}", headers=auth()).get_json()
+    assert [g["from_idea"] for g in board["unassigned"]] == [False]
+    assert [g["from_idea"] for grp in board["givers"] for g in grp["gifts"]] == [True]
+    monkeypatch.setattr(settings, "MODE", "school")
+    assert "from_idea" not in client.get(f"/api/gifts/{plain}", headers=auth()).get_json()

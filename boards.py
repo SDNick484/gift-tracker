@@ -126,7 +126,7 @@ def board(con, occasion_id: int, person_id: int) -> dict:
     unassigned, groups = [], {}
     split = {"santa": 0, "us": 0, "others": 0}
     for row in rows:
-        gj = gifts.to_json(con, row, unlocked=True)
+        gj = {**gifts.to_json(con, row, unlocked=True), "from_idea": gifts.from_idea(con, row["id"])}
         gids, name = givers_of[row["id"]], row["giver_name"]
         if not gids and not name:
             unassigned.append(gj)

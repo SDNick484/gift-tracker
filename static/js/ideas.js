@@ -135,6 +135,40 @@ export const renderIdeasPage = ({ ideas, people, choosable = people.filter(p => 
   <datalist id="giver-names">${renderNameOptions(names)}</datalist>
   ${renderIdeas(filterIdeas(ideas, personId), people, occasions, choosable)}`;
 
+// Opens, or closes again, the take form under a "Take for <name>…" button (data-take, data-person). Shared with the
+// person screen.
+export function toggleTake(view, button, choices) {
+  const slot = view.querySelector(`[data-take-slot="${button.dataset.take}-${button.dataset.person}"]`);
+  if (slot.innerHTML) {
+    slot.innerHTML = "";
+    return;
+  }
+  slot.innerHTML = renderTakeForm(button.dataset.take, button.dataset.person, choices, state.occasions, currentOccasion()?.id ?? "");
+  slot.querySelector("select[name=giver]").focus();
+}
+
+// Sends a take form; true once the gift exists. A refusal is shown in the form.
+export async function submitTake(form) {
+  const error = form.querySelector(".form-error");
+  const body = takeBody(form.elements.giver.value, form.elements.giver_name.value, form.elements.occasion.value);
+  if (!body.giver_ids.length && !body.giver_name) {
+    error.textContent = "Say who is giving it.";
+    return false;
+  }
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  error.textContent = "";
+  try {
+    await send("POST", `/api/ideas/${form.dataset.idea}/take/${form.dataset.person}`, body);
+  } catch (err) {
+    button.disabled = false;
+    error.textContent = err.locked ? "Locked. Unlock, then try again." : err.message;
+    return false;
+  }
+  toast("Taken");
+  return true;
+}
+
 export async function render(ctx) {
   const { view } = ctx;
   const personId = /^\d+$/.test(ctx.query.person ?? "") ? Number(ctx.query.person) : null;
@@ -173,13 +207,7 @@ export async function render(ctx) {
     const t = e.target;
     const take = t.closest?.("[data-take]");
     if (take) {
-      const slot = view.querySelector(`[data-take-slot="${take.dataset.take}-${take.dataset.person}"]`);
-      if (slot.innerHTML) {
-        slot.innerHTML = "";
-        return;
-      }
-      slot.innerHTML = renderTakeForm(take.dataset.take, take.dataset.person, choices, state.occasions, currentOccasion()?.id ?? "");
-      slot.querySelector("select[name=giver]").focus();
+      toggleTake(view, take, choices);
       return;
     }
     if (t.closest?.("[data-cancel-take]")) {
@@ -207,30 +235,11 @@ export async function render(ctx) {
   view.addEventListener("submit", async e => {
     e.preventDefault();
     const form = e.target;
-    const error = form.querySelector(".form-error");
     if (form.dataset.form === "idea-edit") {
       const body = editBody(form);
       if (!body.person_ids.length && !globalThis.confirm("No one is ticked under For. Delete this idea?")) return;
       await run(() => send("PATCH", `/api/ideas/${form.dataset.idea}`, body), body.person_ids.length ? "Saved" : "Deleted");
     }
-    if (form.dataset.form === "take") {
-      const body = takeBody(form.elements.giver.value, form.elements.giver_name.value, form.elements.occasion.value);
-      if (!body.giver_ids.length && !body.giver_name) {
-        error.textContent = "Say who is giving it.";
-        return;
-      }
-      const button = form.querySelector("button[type=submit]");
-      button.disabled = true;
-      error.textContent = "";
-      try {
-        await send("POST", `/api/ideas/${form.dataset.idea}/take/${form.dataset.person}`, body);
-      } catch (err) {
-        button.disabled = false;
-        error.textContent = err.locked ? "Locked. Unlock, then try again." : err.message;
-        return;
-      }
-      toast("Taken");
-      ctx.rerender();
-    }
+    if (form.dataset.form === "take" && await submitTake(form)) ctx.rerender();
   });
 }

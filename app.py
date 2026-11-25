@@ -346,6 +346,8 @@ def gift_json(row):
         out.pop("location_id", None)  # nor hiding places
         out.pop("location_path", None)
         out.pop("giver_name", None)  # nor typed givers
+    else:
+        out["from_idea"] = ideas.is_idea_gift(db(), row["id"])  # the UI offers Back to ideas for such a gift
     return out
 
 

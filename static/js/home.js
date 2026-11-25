@@ -1,4 +1,4 @@
-// #/  Home: one occasion at a glance. The occasion picker with days until, + Idea, the protected section (one
+// #/  Home: one occasion at a glance. The occasion picker with days until, + Idea and Ideas, the protected section (one
 // locked row while locked, one row per protected person once unlocked), then every group with each person's
 // plan, headline and spent of budget.
 import { get } from "./api.js";
@@ -64,9 +64,8 @@ const renderEmpty = summary => (summary.groups.length || summary.protected.peopl
   ? ""
   : `<p class="empty">No one is in this occasion yet. Add people in <a href="#/settings">Settings</a>.</p>`);
 
-// "Not here yet 3 · To wrap 9 · Where is it? · Ideas": links to the three lists and the ideas. Where is it? has no
-// number, as in the spec.
-export const renderCounts = c => `<p class="counts"><a href="#/lists/pending">Not here yet ${esc(c.pending)}</a> · <a href="#/lists/to-wrap">To wrap ${esc(c.to_wrap)}</a> · <a href="#/lists/where">Where is it?</a> · <a href="#/ideas">Ideas</a></p>`;
+// "Not here yet 3 · To wrap 9 · Where is it?": links to the three lists. Where is it? has no number, as in the spec.
+export const renderCounts = c => `<p class="counts"><a href="#/lists/pending">Not here yet ${esc(c.pending)}</a> · <a href="#/lists/to-wrap">To wrap ${esc(c.to_wrap)}</a> · <a href="#/lists/where">Where is it?</a></p>`;
 const renderCountsRow = c => (c ? renderCounts(c) : "");
 
 // The occasion's exchanges, one row each: name, budget, date and how many draws are over budget. Nothing when there
@@ -91,7 +90,7 @@ export const renderHome = (summary, occasions, anyProtected, counts = null) => `
       <span class="countdown">${esc(daysLabel(summary.days_until))}</span>
     </div>
   </div>
-  <a class="btn primary big-add" href="#/idea">${renderIcon("plus")} Idea</a>
+  <div class="home-add"><a class="btn primary big-add" href="#/idea">${renderIcon("plus")} Idea</a><a class="btn" href="#/ideas">Ideas</a></div>
   ${renderCountsRow(counts)}
   ${renderExchangesSection(summary.exchanges)}
   ${renderProtectedSection(summary, anyProtected)}

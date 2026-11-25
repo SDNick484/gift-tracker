@@ -327,9 +327,9 @@ test("board: the Assign menu is the households (not ones of only protected peopl
 });
 
 test("board: assigning sends the givers the user saw as expected_giver_ids, and 'none' unassigns", () => {
-  assert.deepEqual(assignBody({ giver_ids: [] }, "3,4"), { giver_ids: [3, 4], expected_giver_ids: [] });
-  assert.deepEqual(assignBody({ giver_ids: [1, 2] }, "none"), { giver_ids: [], expected_giver_ids: [1, 2] });
-  assert.deepEqual(assignBody({ giver_ids: [3, 4] }, "2"), { giver_ids: [2], expected_giver_ids: [3, 4] });
+  assert.deepEqual(assignBody({ giver_ids: [] }, "3,4"), { giver_ids: [3, 4], giver_name: null, expected_giver_ids: [], expected_giver_name: null });
+  assert.deepEqual(assignBody({ giver_ids: [1, 2] }, "none"), { giver_ids: [], giver_name: null, expected_giver_ids: [1, 2], expected_giver_name: null });
+  assert.deepEqual(assignBody({ giver_ids: [3, 4], giver_name: null }, "2"), { giver_ids: [2], giver_name: null, expected_giver_ids: [3, 4], expected_giver_name: null });
 });
 
 const bgift = (over = {}) => ({ id: 20, title: "Puzzle", status: "idea", track: "ours", price_cents: 2500, store: null, told_at: null, giver_ids: [], santa: false, ...over });
@@ -727,7 +727,7 @@ const pendingGift = (extra = {}) => ({ id: 7, title: "Camera", status: "ordered"
 test("lists: the counts row names the three lists, links them and gives Where is it? no number", () => {
   const html = renderCounts({ pending: 3, to_wrap: 9 });
   assert.ok(html.includes('<a href="#/lists/pending">Not here yet 3</a>') && html.includes('<a href="#/lists/to-wrap">To wrap 9</a>'));
-  assert.ok(html.includes('<a href="#/lists/where">Where is it?</a>') && html.includes('<a href="#/ideas">Ideas</a>'));
+  assert.ok(html.includes('<a href="#/lists/where">Where is it?</a>'));
   const summary = { occasion: { id: 1 }, days_until: 3, groups: [], protected: { locked: true, people: [] } };
   assert.ok(!renderHome(summary, [{ id: 1, name: "X", archived: false }], false).includes('class="counts"'), "no counts given: the old home");
   const home = renderHome(summary, [{ id: 1, name: "X", archived: false }], false, { pending: 0, to_wrap: 2 });
@@ -892,7 +892,7 @@ test("gift screen: Mark ordered posts the card's values to /status, and refreshe
   const h = giftHarness({ gift: orderGift({ status: "decided", seller: null, ship_to_id: null, eta: null, ordered_by: null }),
     handler: c => (c.method === "POST" ? [200, orderGift({ status: "ordered", ordered_by: "Alex" })] : null) });
   await renderGiftScreen(h.ctx);
-  assert.deepEqual(h.calls.map(c => `${c.method} ${c.url}`).sort(), ["GET /api/addresses", "GET /api/gifts/10", "GET /api/locations"]);
+  assert.deepEqual(h.calls.map(c => `${c.method} ${c.url}`).sort(), ["GET /api/addresses", "GET /api/gifts/10", "GET /api/giver-names", "GET /api/locations"]);
   assert.ok(h.view.innerHTML.includes('id="order"') && h.view.innerHTML.includes('id="orderBox"'));
   await h.els["#steps"].handlers.click(stepTap("ordered"));
   const post = h.calls.at(-1);
@@ -925,6 +925,7 @@ test("gift screen: school mode never asks for or sends hiding places", async () 
   const h = giftHarness({ school: true, handler: c => (c.method === "PATCH" ? [200, orderGift()] : null) });
   await renderGiftScreen(h.ctx);
   assert.ok(!h.calls.some(c => c.url === "/api/locations"), "school mode does not fetch the places");
+  assert.ok(!h.calls.some(c => c.url === "/api/giver-names"), "nor typed giver suggestions");
   await h.els["#orderBox"].handlers.submit({ preventDefault() {} });
   assert.ok(!("location_id" in h.calls.at(-1).body));
 });
@@ -1149,7 +1150,7 @@ test("exchanges screen: asks for the current occasion's exchanges and draws them
 });
 
 // ---------------------------------------------------------------- board.js: the wishlist link
-import { ageText, aliasBody, renderWishlist, safeHref, wishBadge, wishChoices, wishlistLine } from "../static/js/board.js";
+import { ageText, aliasBody, renderWishlist, safeHref, wishBadge, wishlistLine } from "../static/js/board.js";
 
 const wlWish = (over = {}) => ({ id: 11, name: "Lego set", url: "https://example.com/lego", store: "Toy Shop", price_cents: 4999,
   occasion: "Christmas", secret: false, reserved_by: null, purchased: false, purchased_by: null, ...over });
@@ -1189,9 +1190,10 @@ test("wishlist: the badge on a linked gift says whether the wishlist agrees", ()
   assert.equal(wishBadge(w({ listed: false, in_sync: false })), "Not in the wishlist feed");
 });
 
-test("wishlist: a wish can go on the board unassigned or straight to a giver; an unmatched name maps to a person", () => {
-  assert.deepEqual(wishChoices([{ value: "1,2", label: "Us" }]),
-    [{ value: "", label: "Add to board…" }, { value: "board", label: "Add, unassigned" }, { value: "1,2", label: "Us" }]);
+test("wishlist: an open wish has one Add to ideas button; an unmatched name maps to a person", () => {
+  const html = renderWishlist(wlBlock(), wlPeople);
+  assert.ok(html.includes('<button type="button" class="btn small" data-wish="11">Add to ideas</button>'), html);
+  assert.ok(!html.includes("<select class=\"assign\" data-wish"), "no select for a wish");
   assert.deepEqual(aliasBody({ kind: "name", value: "uncle rob", label: "Uncle Rob" }, "3"), { kind: "name", value: "uncle rob", person_id: 3 });
 });
 
@@ -1201,21 +1203,21 @@ test("wishlist: everything from the wishlist is escaped and a bad link is not a 
     open: [wlWish({ name: "<img src=x onerror=1>", url: "javascript:alert(1)", store: "<b>S</b>" })],
     reserved: [wlWish({ id: 12, url: null, name: "<script>x</script>", reserved_by: "<b>R</b>", person_id: null, label: "<b>R</b>" })],
     unmatched: [{ kind: "name", value: "<b>r</b>", label: "<script>R</script>" }],
-  }), [{ value: "1", label: "<b>Us</b>" }], wlPeople);
+  }), wlPeople);
   assert.ok(!/<img|<b>|<i>|<script/.test(html), html);
   assert.ok(!html.includes("javascript:") && !html.includes("href="), "a non-http(s) link is plain text");
   assert.ok(html.includes("data-wl-tab") && html.includes("data-alias=\"0\"") && html.includes("data-wl-refresh"));
   assert.ok(html.includes('<option value="3">Pat</option>') && !html.includes(">Gone<"), "only active people to map to");
-  const linked = renderWishlist(wlBlock(), [], wlPeople);
+  const linked = renderWishlist(wlBlock(), wlPeople);
   assert.ok(linked.includes('href="https://example.com/lego"') && linked.includes('rel="noopener noreferrer"'));
   assert.ok(!linked.includes("data-wl-tab"), "a linked board does not ask for its tab");
   assert.ok(linked.includes("$49.99") && linked.includes("Toy Shop · Christmas"));
 });
 
 test("wishlist: while it cannot be reached, Assign is off for wishes and linked gifts only", () => {
-  const offline = renderWishlist(wlBlock({ reachable: false }), [], wlPeople);
+  const offline = renderWishlist(wlBlock({ reachable: false }), wlPeople);
   assert.ok(/data-wish="11"[^>]* disabled>/.test(offline), offline);
-  assert.ok(!/data-wish="11"[^>]* disabled>/.test(renderWishlist(wlBlock(), [], wlPeople)));
+  assert.ok(!/data-wish="11"[^>]* disabled>/.test(renderWishlist(wlBlock(), wlPeople)));
   const b = board({ wishlist: wlBlock({ reachable: false, open: [] }) });
   b.unassigned[0].wish = { item_id: 11, listed: true, reserved_by: null, purchased: false, purchased_by: null, in_sync: true };
   const html = renderBoard(b, "Christmas", [], wlPeople);
@@ -1318,7 +1320,24 @@ test("ideas: the page has the person filter, the copy buttons and a datalist of 
 
 import { render as renderIdeasScreen } from "../static/js/ideas.js";
 
-test("ideas screen: loads ideas, households and names; Copy list and Take send what they should", async () => {
+// A screen test replaces fetch, document, navigator and the shared state; this puts them back when the test ends, so
+// the tests after it see what the tests before it saw.
+function isolate(t) {
+  const saved = { fetch: globalThis.fetch, document: globalThis.document, confirm: globalThis.confirm,
+    navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"), state: { ...state } };
+  t.after(() => {
+    globalThis.fetch = saved.fetch;
+    globalThis.document = saved.document;
+    globalThis.confirm = saved.confirm;
+    if (saved.navigator) Object.defineProperty(globalThis, "navigator", saved.navigator);
+    else delete globalThis.navigator;
+    for (const key of Object.keys(state)) delete state[key];
+    Object.assign(state, saved.state);
+  });
+}
+
+test("ideas screen: loads ideas, households and names; Copy list and Take send what they should", async t => {
+  isolate(t);
   const calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({ method: init.method, url, body: init.body ? JSON.parse(init.body) : undefined });
@@ -1355,4 +1374,203 @@ test("ideas screen: loads ideas, households and names; Copy list and Take send w
   await handlers.submit({ preventDefault() {}, target: form });
   assert.equal(calls.length, before, "no giver: nothing sent");
   assert.equal(error.textContent, "Say who is giving it.");
+});
+
+// ---------------------------------------------------------------- typed givers, ideas on the board, back and move to ideas
+import { renderNameForm } from "../static/js/board.js";
+import { render as renderBoardScreen } from "../static/js/board.js";
+import { render as renderGiftScreenAgain } from "../static/js/gift.js";
+
+test("board: 'Someone else' assigns a typed name; the body carries the gift's current givers and name as expected", () => {
+  assert.deepEqual(assignBody({ giver_ids: [3], giver_name: "Aunt Jo" }, "other", " Uncle Casey "),
+    { giver_ids: [], giver_name: "Uncle Casey", expected_giver_ids: [3], expected_giver_name: "Aunt Jo" });
+  assert.deepEqual(assignBody({ giver_ids: [], giver_name: "Aunt Jo" }, "1,2"),
+    { giver_ids: [1, 2], giver_name: null, expected_giver_ids: [], expected_giver_name: "Aunt Jo" });
+  assert.deepEqual(assignBody({ giver_ids: [], giver_name: "Aunt Jo" }, "none"),
+    { giver_ids: [], giver_name: null, expected_giver_ids: [], expected_giver_name: "Aunt Jo" });
+});
+
+test("gift: the PATCH body sends the typed giver trimmed, null when the box is cleared, and nothing without the box", () => {
+  const f = { title: "Camera", url: "", store: "", price: "", notes: "", recipientIds: [3], giverIds: [] };
+  assert.equal(buildPatch({ ...f, giverName: " Uncle Casey " }).giver_name, "Uncle Casey");
+  assert.equal(buildPatch({ ...f, giverName: "  " }).giver_name, null);
+  assert.equal(buildPatch({ ...f, giverName: "" }).giver_name, null);
+  assert.ok(!("giver_name" in buildPatch(f)), "school mode has no box and sends no key");
+});
+
+const boardIdea = (over = {}) => ({ id: 40, title: "Kite", url: "https://example.com/kite", store: "Toy Shop", price_cents: 1999,
+  notes: null, share: false, wishlist_item_id: null, people: [{ person_id: 7, state: "open", gift_id: null, occasion_id: null, held_by: null }],
+  copy_state: "open", ...over });
+
+test("board: an Ideas section above the giver groups, an Assign menu per open idea, held ones dim with the holder", () => {
+  const b = board({ ideas: [boardIdea({ title: "<b>Kite</b>" }),
+    boardIdea({ id: 41, title: "Drone", url: null, copy_state: "held", people: [{ person_id: 7, state: "held", gift_id: null, occasion_id: null, held_by: "<i>Gran</i>" }] })] });
+  const html = renderBoard(b, "Christmas", assignChoices(households, ppl5), ppl5, ["Aunt <b>Jo</b>"]);
+  assert.ok(!/<b>|<i>/.test(html), html);
+  assert.ok(html.includes("<h3>Ideas</h3>") && html.indexOf("<h3>Ideas</h3>") < html.indexOf("board-group"));
+  assert.ok(html.includes("&lt;b&gt;Kite&lt;/b&gt;") && html.includes("on the wishlist: &lt;i&gt;Gran&lt;/i&gt;"));
+  assert.equal((html.match(/data-idea="40"/g) ?? []).length, 1, "one Assign menu for the open idea");
+  assert.ok(!html.includes('data-idea="41"'), "a held idea has no Assign");
+  assert.ok(/<li class="row dim"[^>]*>\s*<div class="main"><div class="name">Drone/.test(html), "held is dim");
+  assert.ok(/data-idea="40"[^>]*>.*<option value="other">Someone else…<\/option>/.test(html));
+  assert.ok(html.includes('<datalist id="giver-names"><option value="Aunt &lt;b&gt;Jo&lt;/b&gt;"></option></datalist>'));
+  assert.ok(html.includes('data-name-slot="idea-40"'));
+});
+
+test("board: a typed giver renders escaped; Unassign on an idea gift is Back to ideas; old giverless gifts can move to ideas", () => {
+  const b = board();
+  b.givers[0] = { ...b.givers[0], label: "Pat & <i>x", gifts: [bgift({ id: 21, giver_ids: [3], giver_name: "<i>x", track: "theirs", status: "told" })] };
+  b.givers[1].gifts[0].from_idea = true;
+  b.unassigned[0].from_idea = false;
+  const html = renderBoard(b, "Christmas", assignChoices(households, ppl5), ppl5);
+  assert.ok(!/<i>/.test(html), html);
+  assert.ok(/data-gift="22"[^>]*>.*<option value="back">Back to ideas<\/option>/.test(html) && !/data-gift="22"[^>]*>.*value="none"/.test(html));
+  assert.ok(/data-gift="21"[^>]*>.*<option value="none">Unassign<\/option>/.test(html), "an ordinary gift still unassigns");
+  assert.ok(/data-gift="21"[^>]*><option value="" selected>Reassign…/.test(html), "a typed giver counts as assigned");
+  assert.ok(html.includes('data-to-idea="20"') && html.includes("Move to ideas"));
+  assert.equal((html.match(/data-to-idea=/g) ?? []).length, 1);
+  assert.ok(/data-gift="20"[^>]*>.*<option value="other">Someone else…<\/option>/.test(html));
+  const empty = renderBoard(board({ unassigned: [] }), "Christmas", []);
+  assert.ok(!empty.includes("<h3>Unassigned</h3>") && !empty.includes("<h3>Ideas</h3>"), "nothing to show: no section");
+});
+
+test("board: the inline name form has the datalist, a bounded box and OK", () => {
+  const html = renderNameForm("gift", 20);
+  assert.ok(html.includes('data-form="giver-name" data-kind="gift" data-id="20"'));
+  assert.ok(html.includes('name="giver_name"') && html.includes('list="giver-names"') && html.includes('maxlength="80"'));
+  assert.ok(html.includes(">OK</button>") && html.includes("data-cancel-name"));
+});
+
+test("gift: Back to ideas for a gift from an idea, Move to ideas for an old giverless one, neither in school mode", () => {
+  const fromIdea = renderGiftPage(fullGift({ giver_ids: [1], giver_name: null, from_idea: true }), people4, "X", true);
+  assert.ok(fromIdea.includes('id="back-to-ideas"') && fromIdea.includes("Back to ideas") && !fromIdea.includes('id="to-idea"'));
+  const loose = renderGiftPage(fullGift({ giver_ids: [], giver_name: null, from_idea: false }), people4, "X", true);
+  assert.ok(loose.includes('id="to-idea"') && loose.includes("Move to ideas") && !loose.includes('id="back-to-ideas"'));
+  const named = renderGiftPage(fullGift({ giver_ids: [], giver_name: "Aunt Jo", from_idea: false }), people4, "X", true);
+  assert.ok(!named.includes('id="to-idea"') && !named.includes('id="back-to-ideas"'), "a gift with a giver moves nowhere");
+  const school = renderGiftPage(fullGift({ giver_ids: [] }), people4, "X", true);
+  assert.ok(!school.includes('id="to-idea"') && !school.includes('name="giver_name"'), "no family keys: no typed giver, no moves");
+});
+
+test("gift: From has a Someone else box with suggestions, and the sub-line names the typed giver, escaped", () => {
+  const html = renderGiftPage(fullGift({ giver_ids: [3], giver_name: `<i>Uncle</i> "C"`, from_idea: false, track: "theirs", status: "told" }),
+    people4, "X", true, null, ["Aunt <b>Jo</b>"]);
+  assert.ok(!/<i>|<b>/.test(html), html);
+  assert.ok(html.includes(`name="giver_name" type="text" maxlength="80" list="giver-names" value="&lt;i&gt;Uncle&lt;/i&gt; &quot;C&quot;"`));
+  assert.ok(html.includes('<datalist id="giver-names"><option value="Aunt &lt;b&gt;Jo&lt;/b&gt;"></option></datalist>'));
+  assert.ok(html.includes("from Pat &amp; &lt;i&gt;Uncle&lt;/i&gt; &quot;C&quot;"));
+});
+
+test("person: the person's open ideas with Take, the typed giver on a gift row, and no + Idea in school mode", () => {
+  const person = { id: 3, name: "Pat", color: null, household: null, active: true, protected: false };
+  const occasion = { id: 1, name: "Christmas" };
+  const ideasForPat = [boardIdea({ id: 40, title: "<b>Kite</b>", people: [{ person_id: 3, state: "open", gift_id: null, occasion_id: null, held_by: null }] }),
+    boardIdea({ id: 41, title: "Drone", people: [{ person_id: 3, state: "taken", gift_id: 9, occasion_id: 1, held_by: null }] })];
+  const g = gift({ giver_ids: [], giver_name: "<i>Aunt</i>" });
+  const html = renderPage(person, "", occasion, null, null, [g], [], people4, { ideas: ideasForPat, names: ["Jo"] });
+  assert.ok(!/<b>|<i>/.test(html), html);
+  assert.ok(html.includes("<h3>Ideas</h3>") && html.includes("&lt;b&gt;Kite&lt;/b&gt;") && !html.includes("Drone"), "open ideas only");
+  assert.ok(html.includes('data-take="40" data-person="3"') && html.includes('data-take-slot="40-3"'));
+  assert.ok(html.includes("from &lt;i&gt;Aunt&lt;/i&gt;"));
+  assert.ok(html.includes('<datalist id="giver-names"><option value="Jo"></option></datalist>'));
+  assert.ok(html.includes('href="#/idea?for=3"'));
+  const school = renderPage(person, "", occasion, null, null, [], [], people4, { school: true });
+  assert.ok(!school.includes("+ Idea") && !school.includes("#/idea") && !school.includes("<h3>Ideas</h3>"));
+});
+
+test("home: the Ideas link sits next to + Idea, with or without the counts", () => {
+  const summary = { occasion: { id: 1 }, days_until: 3, groups: [], protected: { locked: true, people: [] } };
+  const bare = renderHome(summary, [{ id: 1, name: "X", archived: false }], false);
+  assert.ok(bare.includes('href="#/ideas"'));
+  assert.ok(bare.indexOf('href="#/idea"') < bare.indexOf('href="#/ideas"'));
+  const counted = renderHome(summary, [{ id: 1, name: "X", archived: false }], false, { pending: 1, to_wrap: 2 });
+  assert.equal((counted.match(/href="#\/ideas"/g) ?? []).length, 1, "once, not also in the counts row");
+});
+
+function boardHarness(t, boardData) {
+  isolate(t);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: init.method, url, body: init.body ? JSON.parse(init.body) : undefined });
+    const data = url.startsWith("/api/occasions/1/board/7") && init.method === "GET" ? boardData
+      : url === "/api/households" ? households : url === "/api/giver-names" ? ["Aunt Jo"] : { id: 99 };
+    return { ok: true, status: init.method === "POST" ? 201 : 200, json: async () => data };
+  };
+  globalThis.document = { createElement: () => ({ setAttribute() {}, remove() {} }), body: { append() {} } };
+  Object.assign(state, { me: { unlocked: true }, people: ppl5, occasions: [{ id: 1, name: "Christmas", archived: false }], occasionId: 1 });
+  const handlers = {};
+  const slots = {};
+  const view = { innerHTML: "", addEventListener: (t2, f) => { handlers[t2] = f; },
+    querySelector: sel => (slots[sel] ??= { innerHTML: "", querySelector: () => ({ focus() {} }) }) };
+  const ctx = { view, parts: ["board", "7"], alive: () => true, rerender() { ctx.redraws++; }, redraws: 0 };
+  return { calls, handlers, slots, view, ctx };
+}
+const pick = (attrs, value) => ({ value, dataset: attrs, matches: sel => sel.includes(Object.keys(attrs)[0]) && sel.includes("select") });
+
+test("board screen: Back to ideas, Move to ideas, Add to ideas, assigning an idea and a typed name send what they should", async t => {
+  const b = board({ ideas: [boardIdea()], wishlist: wlBlock() });
+  b.givers[1].gifts[0].from_idea = true;
+  const h = boardHarness(t, b);
+  await renderBoardScreen(h.ctx);
+  assert.deepEqual(h.calls.map(c => c.url).sort(), ["/api/giver-names", "/api/households", "/api/occasions/1/board/7"]);
+
+  await h.handlers.change({ target: pick({ gift: "22" }, "back") });
+  assert.deepEqual(h.calls.at(-1), { method: "POST", url: "/api/gifts/22/back-to-ideas", body: {} });
+
+  const button = dataset => ({ closest: sel => (sel === `[${Object.keys(dataset).map(k => `data-${k.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`)[0]}]` ? { dataset } : null) });
+  await h.handlers.click({ target: button({ toIdea: "20" }) });
+  assert.deepEqual(h.calls.at(-1), { method: "POST", url: "/api/gifts/20/to-idea", body: {} });
+  await h.handlers.click({ target: button({ wish: "11" }) });
+  assert.deepEqual(h.calls.at(-1), { method: "POST", url: "/api/occasions/1/board/7/wishes/11", body: {} });
+
+  await h.handlers.change({ target: pick({ idea: "40" }, "1,2") });
+  assert.deepEqual(h.calls.at(-1), { method: "POST", url: "/api/ideas/40/take/7", body: { giver_ids: [1, 2], occasion_id: 1 } });
+
+  const before = h.calls.length;
+  await h.handlers.change({ target: pick({ idea: "40" }, "other") });
+  assert.equal(h.calls.length, before, "Someone else asks for the name first");
+  assert.ok(h.slots['[data-name-slot="idea-40"]'].innerHTML.includes('data-form="giver-name"'));
+  const error = { textContent: "" };
+  const form = kind => ({ dataset: { form: "giver-name", kind, id: kind === "idea" ? "40" : "20" }, elements: { giver_name: { value: " Uncle Casey " } },
+    querySelector: sel => (sel === ".form-error" ? error : { disabled: false }) });
+  await h.handlers.submit({ preventDefault() {}, target: form("idea") });
+  assert.deepEqual(h.calls.at(-1), { method: "POST", url: "/api/ideas/40/take/7", body: { giver_ids: [], giver_name: "Uncle Casey", occasion_id: 1 } });
+  await h.handlers.submit({ preventDefault() {}, target: form("gift") });
+  assert.deepEqual(h.calls.at(-1), { method: "POST", url: "/api/gifts/20/assign",
+    body: { giver_ids: [], giver_name: "Uncle Casey", expected_giver_ids: [], expected_giver_name: null } });
+  const empty = form("gift");
+  empty.elements.giver_name.value = "  ";
+  const n = h.calls.length;
+  await h.handlers.submit({ preventDefault() {}, target: empty });
+  assert.equal(h.calls.length, n, "no name: nothing sent");
+  assert.equal(error.textContent, "Type a name.");
+});
+
+test("gift screen: Back to ideas and Move to ideas post to their routes and leave the page; the Save sends the typed giver", async t => {
+  isolate(t);
+  globalThis.location = { hash: "#/gift/10" };
+  t.after(() => { delete globalThis.location; });
+  for (const [over, id, path] of [[{ giver_ids: [1], giver_name: null, from_idea: true }, "#back-to-ideas", "back-to-ideas"],
+    [{ giver_ids: [], giver_name: null, from_idea: false }, "#to-idea", "to-idea"]]) {
+    const h = giftHarness({ gift: orderGift(over), handler: () => null });
+    const button = { handlers: {}, addEventListener(type, f) { this.handlers[type] = f; } };
+    const base = h.view.querySelector;
+    h.view.querySelector = sel => (sel === id ? button : base(sel));
+    state.prev = "#/board/7";
+    await renderGiftScreenAgain(h.ctx);
+    assert.ok(h.view.innerHTML.includes(`id="${id.slice(1)}"`));
+    await button.handlers.click();
+    assert.deepEqual(h.calls.at(-1), { method: "POST", url: `/api/gifts/10/${path}`, body: {} });
+    assert.equal(globalThis.location.hash, "#/board/7");
+  }
+  const h = giftHarness({ gift: orderGift({ giver_ids: [], giver_name: "Aunt Jo", from_idea: false }), handler: () => null });
+  const checks = [];
+  h.els["#fields"] = { ...h.els["#fields"], querySelectorAll: () => checks, handlers: {},
+    addEventListener(type, f) { this.handlers[type] = f; },
+    elements: { title: { value: "Camera" }, url: { value: "" }, store: { value: "" }, price: { value: "" }, notes: { value: "" }, giver_name: { value: "  " } } };
+  checks.push({ value: "3" });
+  await renderGiftScreenAgain(h.ctx);
+  await h.els["#fields"].handlers.submit({ preventDefault() {} });
+  assert.equal(h.calls.at(-1).method, "PATCH");
+  assert.equal(h.calls.at(-1).body.giver_name, null, "a cleared box clears the typed giver");
 });

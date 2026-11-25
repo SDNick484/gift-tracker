@@ -114,6 +114,9 @@ main { max-width: 1080px; margin: 0 auto; padding: 4px 16px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .actions .spacer { flex: 1; }
 .big-add { width: 100%; min-height: 48px; font-size: 1rem; }
+.home-add { display: flex; gap: 8px; align-items: stretch; }
+.home-add .big-add { flex: 1; width: auto; }
+.home-add .btn:not(.big-add) { min-height: 48px; }
 
 /* cards and rows */
 .card {
