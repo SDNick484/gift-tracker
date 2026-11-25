@@ -543,6 +543,32 @@ def test_to_idea_keeps_the_wish_and_refuses_a_shared_wish_gift(client, ids, con)
     assert client.get(f"/api/gifts/{three}", headers=auth()).status_code == 200
 
 
+def test_to_idea_checks_inside_its_transaction(client, ids, monkeypatch):
+    """Another owner assigns the gift between to_idea's first read and its write: the checks run again inside the
+    transaction, so the assigned gift is refused (400) and stays, and no idea is made."""
+    import contextlib
+    gift = mk_gift(client, ids.o, "Wish", to=[ids.jordan])
+    real = db.transaction
+    fired = []
+
+    @contextlib.contextmanager
+    def racing(con):
+        if not fired:
+            fired.append(1)
+            other = db.connect(settings.DB_PATH)
+            other.execute("INSERT INTO gift_givers (gift_id, person_id) VALUES (?, ?)", (gift, ids.alex))
+            other.close()
+        with real(con):
+            yield
+
+    monkeypatch.setattr(db, "transaction", racing)
+    r = client.post(f"/api/gifts/{gift}/to-idea", json={}, headers=mut())
+    assert (r.status_code, r.get_json()) == (400, {"error": "Only a gift nobody is giving yet can move to ideas."})
+    assert fired
+    assert con_rows("SELECT COUNT(*) FROM gifts WHERE id = ?", gift) == [(1,)]
+    assert con_rows("SELECT COUNT(*) FROM ideas") == [(0,)]
+
+
 def test_locked_to_idea_of_a_protected_gift_is_404(client, ids):
     from conftest import mk_protected_gift
     gift = mk_protected_gift(ids, title="ZZ-SECRET", to=[ids.kid1], frm=[])

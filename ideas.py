@@ -194,18 +194,23 @@ def to_idea(con, user: dict, gift_id: int) -> int:
     wish moves from the gift to the idea, and an unassigned gift holds no reservation, so the wishlist hears nothing.
     400 for a gift taken from an idea (send it back instead), a gift someone gives, or a wish-linked gift for several
     people (a wish is for one person)."""
-    row = gifts.get(con, gift_id)  # 404
-    if is_idea_gift(con, gift_id):
-        raise ApiError(400, "This gift came from an idea: send it back to ideas instead.")
-    recipients = gifts._ids(con, "gift_recipients", gift_id)
-    if gifts._ids(con, "gift_givers", gift_id) or row["giver_name"]:
-        raise ApiError(400, "Only a gift nobody is giving yet can move to ideas.")
-    if row["wishlist_item_id"] is not None and len(recipients) > 1:
-        raise ApiError(400, "Remove the other recipients first.")
+    gifts.get(con, gift_id)  # 404
     now = common.now()
     try:
         with db.transaction(con):
-            gifts.delete(con, gift_id)  # first: the wish link is unique on each side, and the idea takes it over
+            # Every check is read inside the transaction: an owner assigning the gift meanwhile (which may reserve its
+            # wish) is either fully before it, and refused here, or waits for it.
+            row = gifts.get(con, gift_id)
+            if is_idea_gift(con, gift_id):
+                raise ApiError(400, "This gift came from an idea: send it back to ideas instead.")
+            recipients = gifts._ids(con, "gift_recipients", gift_id)
+            if gifts._ids(con, "gift_givers", gift_id) or row["giver_name"]:
+                raise ApiError(400, "Only a gift nobody is giving yet can move to ideas.")
+            if row["wishlist_item_id"] is not None and len(recipients) > 1:
+                raise ApiError(400, "Remove the other recipients first.")
+            # Directly, not through wishlist.delete_gift: an unassigned gift holds no wishlist reservation (the
+            # decision under "Reopening"), so there is nothing to release. First: the idea takes over the wish link.
+            gifts.delete(con, gift_id)
             iid = con.execute(
                 "INSERT INTO ideas (title, url, store, price_cents, notes, share, wishlist_item_id, created_by, "
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
