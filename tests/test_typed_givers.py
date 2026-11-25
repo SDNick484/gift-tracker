@@ -4,7 +4,7 @@ remembered as a suggestion (only from gifts the caller can see)."""
 import pytest
 from conftest import auth, bearer, mk_gift, mk_person, mk_protected_gift, mk_token, mut
 from test_exchanges import mk_exchange, put_draw
-from test_wishlist import RESERVE, link_tab, no_network, wl  # noqa: F401  (fixtures)
+from test_wishlist import RESERVE, link_tab, no_network, wish_gift, wl  # noqa: F401  (fixtures)
 
 import settings
 import wishlist
@@ -211,13 +211,11 @@ def test_wishlist_label_includes_name(client, con, ids):
 
 @pytest.fixture
 def kite(client, ids, wl, unlock):  # noqa: F811
-    """Kid 1's tab linked and the Lego wish (11) on the board as an unassigned gift."""
+    """Kid 1's tab linked and the Lego wish (11) on the board as an unassigned gift (made the old way: wish_gift)."""
     unlock()
     link_tab(client, ids.kid1, 3)
     client.get(f"/api/occasions/{ids.o}/board/{ids.kid1}", headers=auth())
-    r = client.post(f"/api/occasions/{ids.o}/board/{ids.kid1}/wishes/11", json={}, headers=mut())
-    assert r.status_code == 201, r.get_json()
-    return r.get_json()["id"]
+    return wish_gift(ids, 11)
 
 
 def test_a_named_giver_reserves_the_wish_under_the_name(client, ids, wl, kite):  # noqa: F811

@@ -247,11 +247,15 @@ export async function render(ctx) {
   view.addEventListener("change", e => {
     const t = e.target;
     if (t.matches("select[data-wish]") && t.value) {
-      // Put the wish on the board (nothing is sent to the wishlist), then assign it like any gift (that reserves it).
+      // Pull the wish over as an idea (nothing is sent to the wishlist), then take it for this person with the
+      // chosen givers (that reserves it).
       const value = t.value;
       attempt(async () => {
-        const gift = await send("POST", `/api/occasions/${occasion.id}/board/${personId}/wishes/${t.dataset.wish}`, {});
-        if (value !== "board") await send("POST", `/api/gifts/${gift.id}/assign`, assignBody(gift, value));
+        const idea = await send("POST", `/api/occasions/${occasion.id}/board/${personId}/wishes/${t.dataset.wish}`, {});
+        if (value !== "board") {
+          const { giver_ids } = assignBody({ giver_ids: [] }, value);
+          await send("POST", `/api/ideas/${idea.id}/take/${personId}`, { giver_ids, occasion_id: occasion.id });
+        }
       }, value === "board" ? "Added" : "Assigned");
     } else if (t.matches("select[data-wl-tab]") && t.value) {
       attempt(() => send("PATCH", `/api/people/${personId}`, { wishlist_person_id: Number(t.value) }), "Linked");

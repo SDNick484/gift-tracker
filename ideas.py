@@ -48,10 +48,29 @@ def visible(con, idea_id: int, *, unlocked: bool) -> bool:
     return unlocked or not is_protected(con, idea_id)
 
 
+HELD = "Someone already has this on the wishlist. Reload."
+WISH_ONE_PERSON = "A wish is for one person."
+ON_A_BOARD = "This wish is already on a board. Reload."
+
+
+def _wishlist():
+    import wishlist  # late: wishlist imports boards, which imports this module
+    return wishlist
+
+
 def _held(con, row) -> str | None:
     """Who holds the idea's wish on the wishlist (reserved or purchased), or None. The one place the held state comes
-    from; the wishlist link fills it in later (Task 5). Until then nothing is held."""
-    return None
+    from: wishlist.held, which reads the cache and is None when the link is off."""
+    return _wishlist().held(con, row["wishlist_item_id"]) if row["wishlist_item_id"] is not None else None
+
+
+def _check_wish_person(con, item_id: int, tagged: list[int]) -> None:
+    """A wish-linked idea is for exactly the person whose wishlist tab the wish is on (as the cache shows it)."""
+    it = _wishlist().item(con, item_id)
+    tab = con.execute("SELECT wishlist_person_id FROM people WHERE id = ?", (tagged[0],)).fetchone() \
+        if len(tagged) == 1 else None
+    if it is None or tab is None or tab[0] != it["tab_id"]:
+        raise ApiError(400, WISH_ONE_PERSON)
 
 
 def copy_state(con, row, person_id: int) -> tuple[str, str | None]:
@@ -111,6 +130,8 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) 
     tagged = gifts._person_ids(con, data, "person_ids")
     if not tagged:
         raise ApiError(400, "An idea needs at least one person.")
+    if wishlist_item_id is not None:
+        _check_wish_person(con, wishlist_item_id, tagged)
     now = common.now()
     with db.transaction(con):
         iid = con.execute(
@@ -126,9 +147,13 @@ def update(con, idea_id: int, data: dict) -> bool:
     """Change title, url, store, price, notes, share or the tagged people. Tags change as a set: a person who stays
     keeps their copy (taken or not); untagging a taken copy drops it and leaves the gift alone. No people left
     deletes the idea, and the answer is True. All of it applies or none of it."""
-    _row(con, idea_id)
+    row = _row(con, idea_id)
     f = _fields(data, partial=True)
     tagged = gifts._person_ids(con, data, "person_ids")
+    if tagged and row["wishlist_item_id"] is not None:
+        have = {r[0] for r in con.execute("SELECT person_id FROM idea_people WHERE idea_id = ?", (idea_id,))}
+        if set(tagged) != have:  # an unchanged set is fine even when the cache no longer knows the wish
+            _check_wish_person(con, row["wishlist_item_id"], tagged)
     with db.transaction(con):
         if tagged is not None and not tagged:
             con.execute("DELETE FROM ideas WHERE id = ?", (idea_id,))
@@ -169,7 +194,7 @@ def take(con, user: dict, idea_id: int, person_id: int, data: dict) -> int:
     if state == "taken":
         raise ApiError(409, gifts.TAKEN)
     if state == "held":
-        raise ApiError(409, "Someone already has this on the wishlist. Reload.")
+        raise ApiError(409, HELD)
     giver_ids = gifts._person_ids(con, data, "giver_ids") or []
     name = gifts.giver_name_of(data)
     name = None if name is gifts.ABSENT else name
@@ -185,7 +210,12 @@ def take(con, user: dict, idea_id: int, person_id: int, data: dict) -> int:
     gift = {"occasion_id": occasion_id, "title": row["title"], "url": row["url"] or "", "store": row["store"] or "",
             "notes": row["notes"] or "", "price": row["price_cents"], "recipient_ids": [person_id],
             "giver_ids": giver_ids, "giver_name": name}
-    return gifts.create(con, user, gift, idea_copy=(idea_id, person_id))
+    try:
+        return gifts.create(con, user, gift, wishlist_item_id=row["wishlist_item_id"], idea_copy=(idea_id, person_id))
+    except sqlite3.IntegrityError:
+        if row["wishlist_item_id"] is None:
+            raise
+        raise ApiError(409, ON_A_BOARD) from None  # a gift already names the wish
 
 
 def to_idea(con, user: dict, gift_id: int) -> int:

@@ -496,7 +496,21 @@ def board(client, ids, pid=None):
 
 
 def add(client, ids, item_id, pid=None):
+    """Pull a wish over: since schema 8 it becomes an idea."""
     return client.post(f"/api/occasions/{ids.o}/board/{pid or ids.kid1}/wishes/{item_id}", json={}, headers=mut())
+
+
+def wish_gift(ids, item_id, to=None):
+    """A gift linked to a cached wish, made the way pulling a wish over did before ideas: unassigned, the wish's name,
+    link, store and price. Existing data still has such gifts, and every write-back path still serves them."""
+    c = db.connect(settings.DB_PATH)
+    try:
+        it = wishlist.item(c, item_id)
+        data = {"occasion_id": ids.o, "title": it["name"] or "Wish", "recipient_ids": list(to or [ids.kid1]),
+                "giver_ids": [], "url": it["url"], "store": it["store"], "price": it["price_cents"]}
+        return gifts.create(c, {"email": "alex@example.com"}, data, wishlist_item_id=item_id)
+    finally:
+        c.close()
 
 
 def test_with_the_feature_off_the_board_is_unchanged_and_the_routes_are_404(client, ids, unlock):
@@ -529,32 +543,47 @@ def test_the_board_lists_open_wishes_of_the_linked_tab(client, ids, wl, unlock, 
         "reachable": True, "fetched_at": clock.t, "age_seconds": 0, "tabs": wl_block["tabs"]}
 
 
-def test_adding_a_wish_makes_a_linked_unassigned_gift_and_sends_nothing(client, ids, wl, unlock):
+def test_add_wish_creates_an_idea(client, ids, wl, unlock):
     unlock()
     link_tab(client, ids.kid1, 3)
     link_tab(client, ids.kid2, 4)
     board(client, ids)
     r = add(client, ids, 11)
     assert r.status_code == 201, r.get_json()
-    gift = r.get_json()
-    assert (gift["title"], gift["url"], gift["store"], gift["price_cents"], gift["giver_ids"], gift["recipient_ids"],
-            gift["status"], gift["santa"]) == ("Lego set", "https://example.com/lego", "Toy Shop", 4999, [], [ids.kid1], "idea", False)
-    assert con_rows("SELECT wishlist_item_id FROM gifts WHERE id = ?", gift["id"]) == [(11,)]
-    assert wl.posts() == []
+    idea = r.get_json()
+    assert (idea["title"], idea["url"], idea["store"], idea["price_cents"], idea["share"], idea["wishlist_item_id"]) == \
+        ("Lego set", "https://example.com/lego", "Toy Shop", 4999, False, 11)
+    assert idea["people"] == [{"person_id": ids.kid1, "state": "open", "gift_id": None, "occasion_id": None,
+                               "held_by": None}]
+    assert "santa" not in idea
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert con_rows("SELECT wishlist_item_id FROM ideas WHERE id = ?", idea["id"]) == [(11,)]
     brd = board(client, ids)
     assert [w["id"] for w in brd["wishlist"]["open"]] == [12]
-    [linked] = brd["unassigned"]
-    assert linked["wish"] == {"item_id": 11, "listed": True, "reserved_by": None, "purchased": False,
-                              "purchased_by": None, "in_sync": True}
+    assert brd["unassigned"] == []
+    assert [(i["id"], i["copy_state"]) for i in brd["ideas"]] == [(idea["id"], "open")]
+    assert wl.posts() == []
     assert (add(client, ids, 11).status_code, add(client, ids, 11).get_json()) == (409, {"error": "This wish is already on a board. Reload."})
     assert add(client, ids, 21).status_code == 404               # Kid 2's wish, not on Kid 1's tab
     assert add(client, ids, 999).get_json() == {"error": "No such wish."}
     assert add(client, ids, 11, pid=ids.jordan).status_code == 404  # no board for an unprotected person
     wl.item(12).update(reserved_by="Grandma Pat")
     client.post("/api/wishlist/refresh", json={}, headers=mut())
-    assert add(client, ids, 12).status_code == 409
-    assert con_rows("SELECT COUNT(*) FROM gifts") == [(1,)]
+    assert (add(client, ids, 12).status_code, add(client, ids, 12).get_json()) == \
+        (409, {"error": "Someone already has this on the wishlist. Reload."})
+    assert con_rows("SELECT COUNT(*) FROM ideas") == [(1,)]
     assert wl.posts() == []
+
+
+def test_a_wish_an_old_gift_names_is_not_pulled_over_again(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    board(client, ids)
+    gid = wish_gift(ids, 11)
+    assert [w["id"] for w in board(client, ids)["wishlist"]["open"]] == [12]
+    assert (add(client, ids, 11).status_code, add(client, ids, 11).get_json()) == (409, {"error": "This wish is already on a board. Reload."})
+    assert board(client, ids)["unassigned"][0]["id"] == gid
+    assert con_rows("SELECT COUNT(*) FROM ideas") == [(0,)]
 
 
 def test_a_reservation_made_on_the_wishlist_appears_under_the_matched_person(client, ids, wl, unlock):
@@ -638,8 +667,8 @@ def test_wish_text_is_returned_as_data(client, ids, wl, unlock):
                                           store="</script>")]
     [w] = board(client, ids)["wishlist"]["open"]
     assert (w["name"], w["url"], w["store"]) == ("<img src=x onerror=alert(1)>", None, "</script>")
-    gift = add(client, ids, 11).get_json()
-    assert (gift["title"], gift["url"]) == ("<img src=x onerror=alert(1)>", None)
+    idea = add(client, ids, 11).get_json()
+    assert (idea["title"], idea["url"]) == ("<img src=x onerror=alert(1)>", None)
 
 
 def test_every_wishlist_route_needs_the_unlock(client, ids, wl):
@@ -680,13 +709,12 @@ RESERVE, PURCHASE = "/api/feed/items/11/reserve", "/api/feed/items/11/purchase"
 
 @pytest.fixture
 def lego(client, ids, wl, unlock):
-    """Kid 1's tab linked, the board loaded once (the cache), and the Lego wish on the board as an unassigned gift."""
+    """Kid 1's tab linked, the board loaded once (the cache), and the Lego wish on the board as an unassigned gift
+    (made the old way: wish_gift)."""
     unlock()
     link_tab(client, ids.kid1, 3)
     board(client, ids)
-    r = add(client, ids, 11)
-    assert r.status_code == 201
-    return r.get_json()["id"]
+    return wish_gift(ids, 11)
 
 
 def assign(client, gift_id, givers, expected):
@@ -729,7 +757,7 @@ def test_the_owners_label_is_identical_with_and_without_santa(client, ids, wl, u
     link_tab(client, ids.kid1, 3)
     wl.feed["people"][0]["items"] += [wish(13, "Kite"), wish(14, "Drum")]
     board(client, ids)
-    a, b, c = (add(client, ids, i).get_json()["id"] for i in (11, 12, 13))
+    a, b, c = (wish_gift(ids, i) for i in (11, 12, 13))
     assert assign(client, a, [ids.alex], []).status_code == 200                                  # Alex, no Santa
     r = client.patch(f"/api/gifts/{b}", json={"giver_ids": [ids.sam], "santa": True}, headers=mut())  # Sam, Santa
     assert r.status_code == 200 and r.get_json()["santa"] is True
@@ -933,8 +961,8 @@ def test_deleting_a_reserved_gift_releases_it(client, ids, wl, lego, unlock):
     assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
     # A purchase stays when its gift is deleted, and an unassigned gift has nothing to release.
     board(client, ids)
-    a = add(client, ids, 11).get_json()["id"]
-    b = add(client, ids, 12).get_json()["id"]
+    a = wish_gift(ids, 11)
+    b = wish_gift(ids, 12)
     assign(client, a, [ids.jordan], [])
     status(client, a, "confirmed")
     sent = len(wl.posts())
@@ -986,6 +1014,189 @@ def test_with_the_feature_off_a_linked_gift_is_local_only(client, ids, wl, lego,
     assert client.delete(f"/api/gifts/{lego}", json={}, headers=mut()).status_code == 200
     assert len(wl.requests) == sent
 
+
+
+# ---------------------------------------------------------------- pulled-over wishes are ideas
+@pytest.fixture
+def lego_idea(client, ids, wl, unlock):
+    """Kid 1's tab linked, the cache filled, and the Lego wish pulled over as an idea for Kid 1. Returns its id."""
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    board(client, ids)
+    r = add(client, ids, 11)
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()["id"]
+
+
+def take(client, idea_id, person_id, **body):
+    return client.post(f"/api/ideas/{idea_id}/take/{person_id}", json=body, headers=mut())
+
+
+def idea_state(client, idea_id):
+    r = client.get(f"/api/ideas/{idea_id}", headers=auth())
+    assert r.status_code == 200, r.get_json()
+    [copy] = r.get_json()["people"]
+    return copy["state"], copy["held_by"]
+
+
+def test_wish_idea_is_for_one_person(client, ids, wl, lego_idea):
+    link_tab(client, ids.kid2, 4)
+    one = (400, {"error": "A wish is for one person."})
+    for person_ids in ([ids.kid1, ids.kid2], [ids.kid2], [ids.jordan], [ids.kid1, ids.jordan]):
+        r = client.patch(f"/api/ideas/{lego_idea}", json={"person_ids": person_ids}, headers=mut())
+        assert (r.status_code, r.get_json()) == one, person_ids
+    r = client.patch(f"/api/ideas/{lego_idea}", json={"person_ids": [ids.kid1], "title": "Lego castle"}, headers=mut())
+    assert r.status_code == 200 and r.get_json()["title"] == "Lego castle"
+    assert con_rows("SELECT person_id FROM idea_people WHERE idea_id = ?", lego_idea) == [(ids.kid1,)]
+    # An idea with no wish is tagged as freely as ever.
+    plain = client.post("/api/ideas", json={"title": "Book", "person_ids": [ids.kid1]}, headers=mut()).get_json()["id"]
+    assert client.patch(f"/api/ideas/{plain}", json={"person_ids": [ids.kid1, ids.kid2]}, headers=mut()).status_code == 200
+    assert wl.posts() == []
+
+
+def test_take_wish_idea_reserves(client, ids, wl, lego_idea):
+    pat = client.post("/api/people", json={"name": "Pat"}, headers=mut()).get_json()["id"]
+    lee = client.post("/api/people", json={"name": "Lee"}, headers=mut()).get_json()["id"]
+    r = take(client, lego_idea, ids.kid1, giver_ids=[pat, lee])
+    assert r.status_code == 201, r.get_json()
+    gid = r.get_json()["id"]
+    assert wl.posts() == [(RESERVE, {"by": "Pat & Lee"})]
+    assert wl.item(11)["reserved_by"] == "Pat & Lee"
+    assert con_rows("SELECT wishlist_item_id FROM gifts WHERE id = ?", gid) == [(11,)]
+    assert con_rows("SELECT wishlist_item_id FROM ideas WHERE id = ?", lego_idea) == [(11,)]
+    assert idea_state(client, lego_idea) == ("taken", None)
+    [grp] = board(client, ids)["givers"]
+    assert grp["gifts"][0]["wish"]["in_sync"] is True
+    assert board(client, ids)["ideas"] == []
+    assert client.post(f"/api/gifts/{gid}/back-to-ideas", json={}, headers=mut()).status_code == 200
+    r = take(client, lego_idea, ids.kid1, giver_ids=[], giver_name="Uncle Casey")
+    assert r.status_code == 201, r.get_json()
+    assert wl.posts()[-1] == (RESERVE, {"by": "Uncle Casey"})
+    assert wl.item(11)["reserved_by"] == "Uncle Casey"
+
+
+def test_take_wish_idea_unreachable(client, ids, wl, clock, lego_idea):
+    wl.down = True
+    r = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan])
+    assert (r.status_code, r.get_json()) == (503, {"error": "The wishlist cannot be reached. Nothing was changed."})
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert con_rows("SELECT gift_id FROM idea_people WHERE idea_id = ?", lego_idea) == [(None,)]
+    assert idea_state(client, lego_idea) == ("open", None)
+    assert con_rows("SELECT failed_at FROM wishlist_cache") == [(clock.t,)]
+    wl.down = False
+    assert take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan]).status_code == 201
+    assert wl.item(11)["reserved_by"] == "Jordan"
+
+
+def test_take_wish_idea_refused_by_the_wishlist(client, ids, wl, lego_idea):
+    wl.item(11).update(reserved_by="Pat", reserved_by_email="pat@example.com")  # the cache still says open
+    r = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan])
+    assert (r.status_code, r.get_json()) == (409, {"error": "Someone else has this on the wishlist. Reload."})
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert idea_state(client, lego_idea) == ("held", "Pat")  # refetched: now held
+
+
+def test_take_wish_idea_local_failure_releases(client, ids, wl, lego_idea, monkeypatch):
+    def broken(*_a, **_k):
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(wishlist, "_patch_cache", broken)
+    r = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan])
+    assert r.status_code == 500
+    assert wl.posts() == [(RESERVE, {"by": "Jordan"}), (RESERVE, {"by": None})]
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert con_rows("SELECT gift_id FROM idea_people WHERE idea_id = ?", lego_idea) == [(None,)]
+
+
+def test_held_wish(client, ids, wl, lego_idea):
+    assert client.patch(f"/api/ideas/{lego_idea}", json={"share": True}, headers=mut()).status_code == 200
+    share = lambda: client.get("/api/ideas/share", headers=auth()).get_json()["text"]  # noqa: E731
+    assert "Lego set" in share()
+    wl.item(11).update(reserved_by="Pat", reserved_by_email="pat@example.com")
+    assert client.post("/api/wishlist/refresh", json={}, headers=mut()).status_code == 200
+    assert idea_state(client, lego_idea) == ("held", "Pat")
+    assert share() == ""
+    brd = board(client, ids)
+    assert [(i["id"], i["copy_state"]) for i in brd["ideas"]] == [(lego_idea, "held")]
+    assert brd["wishlist"]["open"] == [w for w in brd["wishlist"]["open"] if w["id"] != 11]
+    assert 11 not in [w["id"] for w in brd["wishlist"]["reserved"]]
+    sent = len(wl.requests)
+    r = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan])
+    assert (r.status_code, r.get_json()) == (409, {"error": "Someone already has this on the wishlist. Reload."})
+    assert len(wl.requests) == sent and con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    wl.item(11).update(reserved_by=None, reserved_by_email=None, purchased=True, purchased_by="Grandma Pat")
+    client.post("/api/wishlist/refresh", json={}, headers=mut())
+    assert idea_state(client, lego_idea) == ("held", "Grandma Pat")
+    wl.item(11).update(purchased=False, purchased_by=None)  # released on the wishlist
+    client.post("/api/wishlist/refresh", json={}, headers=mut())
+    assert idea_state(client, lego_idea) == ("open", None)
+    assert "Lego set" in share()
+    assert take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan]).status_code == 201
+
+
+def test_held_is_none_with_the_link_off(client, ids, wl, lego_idea, monkeypatch, con):
+    wl.item(11).update(reserved_by="Pat", reserved_by_email="pat@example.com")
+    client.post("/api/wishlist/refresh", json={}, headers=mut())
+    assert wishlist.held(con, 11) == "Pat" and wishlist.held(con, 12) is None and wishlist.held(con, 999) is None
+    monkeypatch.setattr(settings, "WISHLIST_URL", "")
+    assert wishlist.held(con, 11) is None
+    assert idea_state(client, lego_idea) == ("open", None)
+    sent = len(wl.requests)
+    r = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan])  # the link is off: a local gift, still linked
+    assert r.status_code == 201
+    assert con_rows("SELECT wishlist_item_id FROM gifts WHERE id = ?", r.get_json()["id"]) == [(11,)]
+    assert len(wl.requests) == sent
+
+
+def test_back_to_ideas_releases(client, ids, wl, lego_idea):
+    gid = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan]).get_json()["id"]
+    assert wl.posts() == [(RESERVE, {"by": "Jordan"})]
+    wl.down = True
+    r = client.post(f"/api/gifts/{gid}/back-to-ideas", json={}, headers=mut())
+    assert r.status_code == 503 and idea_state(client, lego_idea) == ("taken", None)
+    wl.down = False
+    r = client.post(f"/api/gifts/{gid}/back-to-ideas", json={}, headers=mut())
+    assert r.status_code == 200, r.get_json()
+    assert wl.posts()[-1] == (RESERVE, {"by": None})
+    assert wl.item(11)["reserved_by"] is None
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert idea_state(client, lego_idea) == ("open", None)
+    assert con_rows("SELECT wishlist_item_id FROM ideas WHERE id = ?", lego_idea) == [(11,)]
+
+
+def test_gone_wish_unlinks_idea(client, ids, wl, lego_idea):
+    link_tab(client, ids.kid2, 4)
+    scooter = add(client, ids, 21, pid=ids.kid2).get_json()["id"]
+    gid = take(client, lego_idea, ids.kid1, giver_ids=[ids.jordan]).get_json()["id"]
+    del wl.feed["people"][1]  # Kid 2's tab hidden: its idea keeps the link
+    assert client.post("/api/wishlist/refresh", json={}, headers=mut()).get_json()["reachable"] is True
+    assert con_rows("SELECT id, wishlist_item_id FROM ideas ORDER BY id") == [(lego_idea, 11), (scooter, 21)]
+    wl.feed["people"][0]["items"] = [it for it in wl.feed["people"][0]["items"] if it["id"] != 11]  # deleted
+    assert client.post("/api/wishlist/refresh", json={}, headers=mut()).get_json()["reachable"] is True
+    assert con_rows("SELECT id, wishlist_item_id, title FROM ideas ORDER BY id") == \
+        [(lego_idea, None, "Lego set"), (scooter, 21, "Scooter")]
+    assert con_rows("SELECT wishlist_item_id FROM gifts WHERE id = ?", gid) == [(None,)]
+    assert idea_state(client, lego_idea) == ("taken", None)
+
+
+def test_to_idea_moves_the_wish_link(client, ids, wl, unlock):
+    unlock()
+    link_tab(client, ids.kid1, 3)
+    board(client, ids)
+    gid = wish_gift(ids, 11)
+    r = client.post(f"/api/gifts/{gid}/to-idea", json={}, headers=mut())
+    assert r.status_code == 201, r.get_json()
+    idea = r.get_json()
+    assert (idea["title"], idea["wishlist_item_id"], [p["person_id"] for p in idea["people"]]) == \
+        ("Lego set", 11, [ids.kid1])
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    brd = board(client, ids)
+    assert [w["id"] for w in brd["wishlist"]["open"]] == [12]
+    assert [i["id"] for i in brd["ideas"]] == [idea["id"]]
+    shared = wish_gift(ids, 12, to=[ids.kid1, ids.kid2])
+    r = client.post(f"/api/gifts/{shared}/to-idea", json={}, headers=mut())
+    assert (r.status_code, r.get_json()) == (400, {"error": "Remove the other recipients first."})
+    assert con_rows("SELECT wishlist_item_id FROM gifts WHERE id = ?", shared) == [(12,)]
+    assert wl.posts() == []
 
 
 # ---------------------------------------------------------------- school mode, the token, locked writes

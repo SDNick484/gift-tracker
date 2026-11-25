@@ -528,7 +528,7 @@ def ideas_take(idea_id, person_id):
     visible_idea(idea_id)
     data = json_body()
     refuse_locked_write(data)
-    gid = ideas.take(db(), g.user, idea_id, person_id, data)
+    gid = wishlist.take_idea(db(), g.user, idea_id, person_id, data)  # reserves a linked wish
     return jsonify(gift_json(visible_gift(gid))), 201
 
 
@@ -777,10 +777,10 @@ def wishlist_refresh():
 @unlock_required
 @wishlist_on
 def wishlist_add_wish(occasion_id, person_id, item_id):
-    """Put a wish on the person's board as an unassigned gift linked to it. Nothing is sent to the wishlist."""
+    """Pull a wish over as an idea for the person, linked to it; 201 with the idea. Nothing is sent to the wishlist."""
     json_body()
-    gid = wishlist.add_wish(db(), g.user, occasion_id, person_id, item_id)
-    return jsonify(gift_json(visible_gift(gid))), 201
+    iid = wishlist.add_wish(db(), g.user, occasion_id, person_id, item_id)
+    return jsonify(visible_idea(iid)), 201
 
 
 @app.get("/api/wishlist/aliases")
