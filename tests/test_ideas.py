@@ -663,3 +663,104 @@ def test_gift_json_says_whether_it_came_from_an_idea(client, ids, unlock, monkey
     assert [g["from_idea"] for grp in board["givers"] for g in grp["gifts"]] == [True]
     monkeypatch.setattr(settings, "MODE", "school")
     assert "from_idea" not in client.get(f"/api/gifts/{plain}", headers=auth()).get_json()
+
+
+# ---------------------------------------------------------------- an idea hidden by the lock has no visible gift
+ALSO_LOCKED = (400, {"error": "This idea is also for someone behind the lock. Make a separate idea for this person."})
+
+
+def test_taking_a_protected_ideas_copy_for_an_unprotected_person_is_400(client, ids, unlock):
+    """The gift would show while locked and point at a hidden idea (from_idea, back to ideas, move to ideas)."""
+    unlock()
+    idea = mk_idea(client, "Kite", [ids.kid1, ids.jordan])["id"]
+    r = take(client, idea, ids.jordan, giver_ids=[ids.alex])
+    assert (r.status_code, r.get_json()) == ALSO_LOCKED
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert states(client, idea) == {ids.kid1: ("open", None), ids.jordan: ("open", None)}
+    # the protected person's own copy is fine: that gift is protected itself
+    assert take(client, idea, ids.kid1, giver_ids=[ids.alex]).status_code == 201
+
+
+def test_taking_from_an_idea_hidden_by_a_protected_gift_is_400(client, ids, unlock):
+    unlock()
+    idea = mk_idea(client, "Kite", [ids.jordan, ids.riley])["id"]
+    gift = take(client, idea, ids.jordan, giver_ids=[ids.alex]).get_json()["id"]
+    assert client.patch(f"/api/gifts/{gift}", json={"recipient_ids": [ids.jordan, ids.kid1]},
+                        headers=mut()).status_code == 200
+    r = take(client, idea, ids.riley, giver_ids=[ids.alex])
+    assert (r.status_code, r.get_json()) == ALSO_LOCKED
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(1,)]
+
+
+def test_take_checks_again_inside_the_gift_transaction(client, ids, monkeypatch):
+    """A protected person is tagged between take's check and gifts.create: the check inside the transaction refuses
+    it, and the gift is rolled back."""
+    import gifts
+    idea = mk_idea(client, "Kite", [ids.jordan])["id"]
+    real = gifts.create
+
+    def racing_create(con, user, data, **kw):
+        other = db.connect(settings.DB_PATH)
+        other.execute("INSERT INTO idea_people (idea_id, person_id) VALUES (?, ?)", (idea, ids.kid1))
+        other.close()
+        return real(con, user, data, **kw)
+
+    monkeypatch.setattr(gifts, "create", racing_create)
+    r = take(client, idea, ids.jordan, giver_ids=[ids.alex])
+    assert (r.status_code, r.get_json()) == ALSO_LOCKED
+    assert con_rows("SELECT COUNT(*) FROM gifts") == [(0,)]
+    assert con_rows("SELECT gift_id FROM idea_people") == [(None,), (None,)]
+
+
+def test_tagging_a_protected_person_beside_a_copy_taken_for_someone_else_is_400(client, ids, unlock):
+    unlock()
+    idea = mk_idea(client, "Kite", [ids.jordan, ids.riley])["id"]
+    gift = take(client, idea, ids.jordan, giver_ids=[ids.alex]).get_json()["id"]
+    r = client.patch(f"/api/ideas/{idea}", json={"title": "Big kite", "person_ids": [ids.jordan, ids.riley, ids.kid1]},
+                     headers=mut())
+    assert (r.status_code, r.get_json()) == ALSO_LOCKED
+    assert con_rows("SELECT person_id FROM idea_people WHERE idea_id = ? ORDER BY person_id", idea) == \
+        sorted([(ids.jordan,), (ids.riley,)])
+    assert con_rows("SELECT title FROM ideas") == [("Kite",)]
+    # untagging the taken copy at the same time is fine (the gift no longer points at the idea)
+    r = client.patch(f"/api/ideas/{idea}", json={"person_ids": [ids.riley, ids.kid1]}, headers=mut())
+    assert r.status_code == 200, r.get_json()
+    assert client.get(f"/api/gifts/{gift}", headers=auth()).get_json()["from_idea"] is False
+
+
+def test_protecting_a_person_tagged_beside_a_copy_taken_for_someone_else_is_409(client, ids, unlock):
+    unlock()
+    idea = mk_idea(client, "Kite", [ids.jordan, ids.riley])["id"]
+    take(client, idea, ids.jordan, giver_ids=[ids.alex])
+    r = client.patch(f"/api/people/{ids.riley}", json={"protected": True}, headers=mut())
+    assert (r.status_code, r.get_json()) == \
+        (409, {"error": "This person is on an idea already taken for someone else. Untag them first."})
+    assert con_rows("SELECT protected FROM people WHERE id = ?", ids.riley) == [(0,)]
+    # protecting the person whose copy it is hides the idea and its gift together: fine
+    assert client.patch(f"/api/people/{ids.jordan}", json={"protected": True}, headers=mut()).status_code == 200
+    # and so is protecting someone on no taken idea, and any other change to Riley
+    assert client.patch(f"/api/people/{ids.casey}", json={"protected": True}, headers=mut()).status_code == 200
+    assert client.patch(f"/api/people/{ids.riley}", json={"notes": "x"}, headers=mut()).status_code == 200
+
+
+def test_unprotecting_a_person_whose_copy_is_taken_beside_a_protected_one_is_409(client, ids, unlock, con):
+    unlock()
+    con.execute("UPDATE people SET protected = 1 WHERE id = ?", (ids.jordan,))
+    idea = mk_idea(client, "Kite", [ids.jordan, ids.kid1])["id"]
+    take(client, idea, ids.jordan, giver_ids=[ids.alex])
+    r = client.patch(f"/api/people/{ids.jordan}", json={"protected": False}, headers=mut())
+    assert r.status_code == 409, r.get_json()
+    assert con_rows("SELECT protected FROM people WHERE id = ?", ids.jordan) == [(1,)]
+
+
+def test_adding_a_protected_recipient_to_one_copy_of_a_shared_taken_idea_is_400(client, ids, unlock):
+    unlock()
+    idea = mk_idea(client, "Kite", [ids.jordan, ids.riley])["id"]
+    g1 = take(client, idea, ids.jordan, giver_ids=[ids.alex]).get_json()["id"]
+    take(client, idea, ids.riley, giver_ids=[ids.alex])
+    r = client.patch(f"/api/gifts/{g1}", json={"title": "Big kite", "recipient_ids": [ids.jordan, ids.kid1]},
+                     headers=mut())
+    assert r.status_code == 400, r.get_json()
+    assert con_rows("SELECT person_id FROM gift_recipients WHERE gift_id = ?", g1) == [(ids.jordan,)]
+    assert con_rows("SELECT title FROM gifts WHERE id = ?", g1) == [("Kite",)]
+

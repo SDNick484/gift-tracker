@@ -5,6 +5,7 @@ remembering to add a test here: give its path arguments a value in ARGS and it i
 Fixture data: three protected gifts with distinctive markers, one of them shared with the unprotected Jordan and
 from an owner with Santa set; one visible gift that also has Santa set, as a control."""
 import itertools
+import json
 import types
 
 import pytest
@@ -299,3 +300,66 @@ def test_a_second_owner_must_unlock_for_themselves(client, world, unlock):
     unlock("alex@example.com")
     set_pin(client, PIN, "sam@example.com")
     assert client.get(f"/api/gifts/{world.shared}", headers=auth("sam@example.com")).status_code == 404
+
+
+def _gifts_in(value):
+    """Every dict with a `from_idea` key anywhere in a JSON value: gift JSON, in a list, a board or a group."""
+    if isinstance(value, dict):
+        if "from_idea" in value:
+            yield value
+        for v in value.values():
+            yield from _gifts_in(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _gifts_in(v)
+
+
+def test_every_idea_gift_a_locked_caller_sees_points_to_a_visible_idea(client, world, unlock):
+    """A gift taken from an idea shows whether it came from one (from_idea), and back to ideas and move to ideas
+    answer by it. So while locked, a visible gift with from_idea true must be some visible idea's copy, or a hidden
+    idea would show through it. Unlocked, try each way to hide an idea behind a visible gift taken from it (each is
+    refused); then, locked, every visible gift's answers must follow the visible ideas list alone."""
+    i = world.ids
+    unlock()
+
+    def mk(title, person_ids):
+        return client.post("/api/ideas", json={"title": title, "person_ids": person_ids}, headers=mut()).get_json()["id"]
+
+    def take(idea, pid):
+        return client.post(f"/api/ideas/{idea}/take/{pid}", json={"giver_ids": [i.alex]}, headers=mut()).get_json()
+
+    seen = take(mk("Kite", [i.jordan, i.casey]), i.jordan)["id"]   # a visible idea gift
+    take(mk("Kite A", [i.kid1, i.jordan]), i.jordan)                # taking for Jordan beside a protected tag
+    b = mk("Kite B", [i.jordan, i.riley])
+    take(b, i.jordan)
+    client.patch(f"/api/ideas/{b}", json={"person_ids": [i.jordan, i.riley, i.kid2]}, headers=mut())  # tagging
+    take(mk("Kite C", [i.riley, i.casey]), i.casey)
+    client.patch(f"/api/people/{i.riley}", json={"protected": True}, headers=mut())                  # protecting
+    d = mk("Kite D", [i.jordan, i.casey])
+    d_gift = take(d, i.jordan)["id"]
+    take(d, i.casey)
+    client.patch(f"/api/gifts/{d_gift}", json={"recipient_ids": [i.jordan, i.kid3]}, headers=mut())  # a recipient
+    assert client.post("/api/lock/lock", json={}, headers=mut()).status_code == 200
+
+    copies = {p["gift_id"] for idea in client.get("/api/ideas", headers=auth()).get_json()
+              for p in idea["people"] if p["gift_id"] is not None}
+    assert seen in copies
+    shown = []
+    for url, text in walk_gets(client, world, query=("",)).items():
+        if text.startswith(("{", "[")):
+            shown += [(url, g) for g in _gifts_in(json.loads(text))]
+    for (gid,) in con_rows("SELECT id FROM gifts ORDER BY id"):
+        r = client.get(f"/api/gifts/{gid}", headers=auth())
+        if r.status_code == 200:
+            shown.append((f"/api/gifts/{gid}", r.get_json()))
+    assert any(g["id"] == seen for _, g in shown)
+    for url, g in shown:
+        assert g["from_idea"] == (g["id"] in copies), (url, g["id"], g["title"])
+    for gid in {g["id"] for _, g in shown} - copies:
+        r = client.post(f"/api/gifts/{gid}/back-to-ideas", json={}, headers=mut())
+        assert (r.status_code, r.get_json()) == (400, {"error": "This gift did not come from an idea."}), gid
+        r = client.post(f"/api/gifts/{gid}/to-idea", json={}, headers=mut())
+        assert "came from an idea" not in r.get_data(as_text=True), gid
+    for gid in copies:
+        r = client.post(f"/api/gifts/{gid}/to-idea", json={}, headers=mut())
+        assert (r.status_code, r.get_json()["error"]) == (400, "This gift came from an idea: send it back to ideas instead.")

@@ -6,7 +6,8 @@ common.ApiError on bad input.
 Visibility mirrors gifts.py: an idea with any protected person tagged, or with any copy taken by a protected gift, is
 protected. While locked it does not exist: lists take a required `unlocked` and filter on PROTECTED_SQL, and app.py
 checks visible() before any read or write of one idea. create/update/delete/take/to_idea do not look at the lock;
-app.py refuses locked writes that would tag a protected person. share_text takes `unlocked` like a list.
+app.py refuses locked writes that would tag a protected person. share_text takes `unlocked` like a list. No write may
+leave a hidden idea with a visible gift taken from it (EXPOSED_SQL, exposed()).
 
 Taking a copy makes a gift for that one person (take); the copy reopens when the gift is deleted (ON DELETE SET NULL,
 which is also "back to ideas"), or when that person is taken off the gift (gifts.update). to_idea turns an unassigned
@@ -29,6 +30,26 @@ PROTECTED_SQL = ("(EXISTS (SELECT 1 FROM idea_people ip JOIN people ipp ON ipp.i
                  f"WHERE iq.idea_id = i.id AND {gifts.PROTECTED_SQL}))")
 
 
+# True for an idea (alias `i`) that is protected while some taken copy's gift is not: that gift would be visible while
+# locked and point at an idea that does not exist (from_idea, back to ideas, move to ideas would all tell). No write may
+# leave an idea in this state; each writer that could checks exposed() inside its transaction.
+EXPOSED_SQL = (f"({PROTECTED_SQL} AND EXISTS (SELECT 1 FROM idea_people ix JOIN gifts g ON g.id = ix.gift_id "
+               f"WHERE ix.idea_id = i.id AND NOT {gifts.PROTECTED_SQL}))")
+
+
+def exposed(con, *, idea_id: int | None = None, gift_id: int | None = None) -> bool:
+    """Whether some idea is in the EXPOSED_SQL state: that idea, the ideas this gift is a copy of, or (no argument)
+    any idea. Never in school mode, which has no lock (nor ideas)."""
+    if common.is_school():
+        return False
+    scope, params = "1", ()
+    if idea_id is not None:
+        scope, params = "i.id = ?", (idea_id,)
+    elif gift_id is not None:
+        scope, params = "EXISTS (SELECT 1 FROM idea_people iz WHERE iz.idea_id = i.id AND iz.gift_id = ?)", (gift_id,)
+    return con.execute(f"SELECT 1 FROM ideas i WHERE {scope} AND {EXPOSED_SQL}", params).fetchone() is not None
+
+
 # ---------------------------------------------------------------- reading
 def _row(con, idea_id: int):
     row = con.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,)).fetchone()
@@ -49,6 +70,7 @@ def visible(con, idea_id: int, *, unlocked: bool) -> bool:
 
 
 HELD = "Someone already has this on the wishlist. Reload."
+ALSO_LOCKED = "This idea is also for someone behind the lock. Make a separate idea for this person."
 WISH_ONE_PERSON = "A wish is for one person."
 ON_A_BOARD = "This wish is already on a board. Reload."
 
@@ -164,6 +186,8 @@ def update(con, idea_id: int, data: dict) -> bool:
                             [(idea_id, p) for p in have - set(tagged)])
             con.executemany("INSERT INTO idea_people (idea_id, person_id) VALUES (?, ?)",
                             [(idea_id, p) for p in tagged if p not in have])
+            if exposed(con, idea_id=idea_id):  # a protected person tagged beside a copy taken for someone else
+                raise ApiError(400, ALSO_LOCKED)
         f["updated_at"] = common.now()
         con.execute(f"UPDATE ideas SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), idea_id))
     return False
@@ -195,6 +219,10 @@ def take(con, user: dict, idea_id: int, person_id: int, data: dict) -> int:
         raise ApiError(409, gifts.TAKEN)
     if state == "held":
         raise ApiError(409, HELD)
+    if is_protected(con, idea_id) and person_id not in people.protected_ids(con):
+        # the gift would be visible while locked and point at a hidden idea (gifts.create checks again in its
+        # transaction); a protected person's own gift is protected itself
+        raise ApiError(400, ALSO_LOCKED)
     giver_ids = gifts._person_ids(con, data, "giver_ids") or []
     name = gifts.giver_name_of(data)
     name = None if name is gifts.ABSENT else name

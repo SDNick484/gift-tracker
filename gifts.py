@@ -37,6 +37,22 @@ ABSENT = object()    # giver_name_of: the body does not name giver_name
 EXCHANGE_NAME = "A gift for an exchange is from the drawer: no typed name."
 BACK_TO_IDEAS = "Send it back to ideas instead."
 TAKEN = "Someone just took this. Reload."
+IDEA_TAKEN_ELSEWHERE = ("This gift came from an idea also taken for someone else, so it cannot go behind the lock. "
+                        "Send it back to ideas first.")
+
+
+def _ideas():
+    import ideas  # late: ideas imports this module
+    return ideas
+
+
+def refuse_exposing_an_idea(con, gift_id: int) -> None:
+    """400 when this gift, a copy of an idea, has just made that idea protected while another copy's gift is still
+    visible (ideas.EXPOSED_SQL): that visible gift would point at a hidden idea. Runs inside the writer's transaction,
+    after the write. Only an unlocked caller gets here (a locked one is 423 for a protected recipient or giver first),
+    so the message reveals nothing."""
+    if _ideas().exposed(con, gift_id=gift_id):
+        raise ApiError(400, IDEA_TAKEN_ELSEWHERE)
 
 
 def track(giver_ids: set[int], user_ids: set[int], giver_name: str | None = None) -> str:
@@ -258,6 +274,8 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None,
                 "UPDATE idea_people SET gift_id = ? WHERE idea_id = ? AND person_id = ? AND gift_id IS NULL",
                 (gid, *idea_copy)).rowcount:
             raise ApiError(409, TAKEN)
+        if idea_copy is not None and _ideas().exposed(con, idea_id=idea_copy[0]):  # ideas.take checked it first
+            raise ApiError(400, _ideas().ALSO_LOCKED)
     return gid
 
 
@@ -318,6 +336,7 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
         else:
             orders.write(con, gift_id, order)
         exchanges.check_gift(con, gift_id)  # the link, new or old, must still be a draw
+        refuse_exposing_an_idea(con, gift_id)  # a protected recipient or giver now, on one copy of a shared idea
         if after_write:
             after_write()
 
@@ -371,6 +390,7 @@ def _set_givers(con, gift_id: int, giver_ids: list[int], *, giver_name=ABSENT) -
     after = track(set(giver_ids), user_ids, name)
     con.execute("DELETE FROM gift_givers WHERE gift_id = ?", (gift_id,))
     con.executemany("INSERT INTO gift_givers (gift_id, person_id) VALUES (?, ?)", [(gift_id, p) for p in giver_ids])
+    refuse_exposing_an_idea(con, gift_id)  # a protected giver on a gift for an exchange
     status, santa, told_at = row["status"], row["santa"], row["told_at"]
     if after != before and status != "given":
         status = "told" if after == "theirs" else "decided"
