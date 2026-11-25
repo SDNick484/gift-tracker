@@ -121,6 +121,20 @@ Logic is in `wishlist.py`; routes are the wishlist block of `app.py` plus the bo
   wishlist (`refuse_agent_flip`) and never shows it.
 - Wishlist text (names, holders, URLs) is untrusted: `esc()` in the UI, and the parser drops a non-http(s) URL.
 
+## Ideas and typed givers
+
+Decisions in `docs/superpowers/plans/2026-11-24-ideas-and-typed-givers.md` and the spec of the same date. Logic is in `ideas.py`; routes are the ideas block of `app.py` plus `/api/giver-names`, `back-to-ideas` and `to-idea` on a gift.
+
+- An idea is a thing to buy for one or more tagged people, not yet a gift. `idea_people` holds one copy per tagged person; a copy is `taken` when its `gift_id` is set, `held` when the idea has a wish, the wishlist is on and the cached wish is reserved or purchased (computed on read from `wishlist.held`, never stored), else `open`.
+- Privacy extends the rule above. `ideas.PROTECTED_SQL` hides an idea when any tagged person is protected **or** any taken copy's gift matches `gifts.PROTECTED_SQL`, so an unprotected idea vanishes from a locked caller if a taken copy's gift later gains a protected recipient or giver. Every idea read (list, get, `?person=`, board, share text, counts) filters on it; a hidden idea is the same 404 `No such idea.` as a missing one, for GET, PATCH, DELETE and take. A body naming a protected person is 423. Giver-name suggestions filter on `gifts.PROTECTED_SQL`.
+- Taking goes through `gifts.create(idea_copy=(idea_id, person_id))`, which claims the copy inside its own transaction (a lost race is 409 and rolls the gift back), or through `wishlist.take_idea` for a wish-linked idea: the gift is committed, then the reservation is written through `_write_through`; any failure deletes the gift and reopens the copy (503 when the wishlist is unreachable). A route must not take a copy any other way.
+- Reopening: deleting a gift reopens its copy (`ON DELETE SET NULL`); `gifts.update` removing a recipient reopens that person's copy only; back to ideas deletes through `wishlist.delete_gift`. On a gift that is some copy's gift, clearing every giver and the typed name is 400 "Send it back to ideas instead." (`gifts.refuse_no_giver`). Never write `gift_id` inline elsewhere.
+- Move to ideas (`ideas.to_idea`) is 400 for an idea gift or a gift with a giver or name, and for a wish-linked gift with several recipients; the wish link moves from gift to idea, so no wishlist call is made. Pulling a wish over (`wishlist.add_wish`) creates an idea and sends nothing to the wishlist.
+- Typed giver: `gifts.giver_name` (trimmed, 1 to 80 characters, `""` or `null` clears; `gifts.parse_giver_name`). It is a giver for the track: `gifts.track(giver_ids, user_ids, giver_name)` is `ours` with no giver at all or an owner among the ids, else `theirs`. Every caller with a gift row passes its `giver_name`. Board groups key on `(giver_ids, giver_name)`; `wishlist.label(con, ids, giver_name)` appends the name as one more part. Santa still needs an owner among the ids.
+- Ideas, the share list, giver names, take, back to ideas and move to ideas are all `family_only`; a `giver_name` in a body in school mode is 400 and school gift JSON has no `giver_name` or `from_idea` key. `tests/test_school.py::FAMILY_ONLY` pins them.
+- `/api/v1` shows `giver_name` to `full` scope only (where `giver_ids` is shown) and never writes it: `agent.create_gift` with `giver_name` is 400. No v1 route is added and no MCP tool.
+- Deleting a person tagged on an idea is 409. The share flag defaults to off; the shared text carries title, store and link only, for people with an open copy.
+
 ## File structure
 
 ```
@@ -141,6 +155,7 @@ addresses.py      ship-to addresses, exactly one home
 locations.py      the hiding-place tree, the ancestor rule, set_gift_location
 lists.py          Not here yet, To wrap, Where is it?, and the home counts
 exchanges.py      gift exchanges: draws, the gift for a draw, the over-budget flag, the lock on protected draws
+ideas.py          ideas: tagged copies, copy state, take, share text, move to ideas, the protection of an idea
 wishlist.py       the wishlist link: guarded transport, cached feed, labels, matching, board wishes, write-back
 tokens.py         agent API tokens (hash only), the notes a token leaves on a gift
 agent.py          /api/v1: what each token scope may read and write, a gift as a scope sees it
@@ -149,7 +164,7 @@ mcp_http.py       the MCP service: Streamable HTTP behind Cloudflare Access
 mcp_remote.py     verbatim copy of mcp-server-shared remote.py (Access JWT, Host check, /healthz)
 requirements-mcp.txt  the MCP service's venv (not the app's)
 static/           index.html (GET / fills in APP_NAME), style.css, manifest.json (GET /manifest.json adds the name), icon.svg
-static/js/        ES modules: main (router), core, api, lock and one module per screen
+static/js/        ES modules: main (router), core, api, lock and one module per screen (ideas.js is the ideas screen, idea.js the quick-idea form)
 tests/            conftest.py + one test file per module
 installer/        setup-head.sh, build.sh
 deploy/           deploy.env.example
