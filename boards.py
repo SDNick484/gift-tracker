@@ -1,6 +1,7 @@
 """A protected person's board for one occasion: unassigned wishes, gifts grouped by who gives them, the
-Santa/us/others split and the side-by-side total for every protected person; assignment with a conflict check;
-and a giver's list as copyable text. Route-free: every function takes a sqlite3.Connection.
+Santa/us/others split and the side-by-side total for every protected person; the person's ideas still open for them;
+assignment with a conflict check; and a giver's list as copyable text. Route-free: every function takes a
+sqlite3.Connection.
 
 Everything here shows protected gifts, so app.py serves it only behind @unlock_required.
 
@@ -11,6 +12,7 @@ instead of winning."""
 import budgets
 import db
 import gifts
+import ideas
 import occasions
 import people
 from common import ApiError
@@ -45,7 +47,8 @@ def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int
     """Replace the gift's givers and typed name, but only if they are still `expected_giver_ids` (compared as sets)
     and `expected_giver_name`; otherwise 409. Giving it to someone else moves it to the theirs track (told, told_at
     today) as gifts._set_givers does. No giver ids and no name unassigns it: status idea, told_at cleared, Santa
-    dropped. A gift for an exchange takes no typed name (400).
+    dropped; on a gift taken from an idea that is 400 (send it back instead). A gift for an exchange takes no typed
+    name (400).
 
     `after_write()`, when given, runs inside the transaction after the local write (wishlist.assign writes the
     reservation there); if it raises, nothing is written."""
@@ -57,6 +60,7 @@ def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int
             raise ApiError(409, CONFLICT)
         if giver_name and row["exchange_id"] is not None:
             raise ApiError(400, gifts.EXCHANGE_NAME)
+        gifts.refuse_no_giver(con, gift_id, ids, giver_name)  # a gift taken from an idea goes back instead
         # Inside this transaction: gifts.set_givers would open its own. An unchanged name is simply kept.
         gifts._set_givers(con, gift_id, ids, **({} if giver_name == row["giver_name"] else {"giver_name": giver_name}))
         if not ids and not giver_name:
@@ -107,7 +111,9 @@ def _evenness(con, occasion_id: int, user_ids: set[int]) -> list[dict]:
 def board(con, occasion_id: int, person_id: int) -> dict:
     """The board for a protected person (404 for anyone else). Giver groups: one per distinct giver set (the
     people and the typed name), other givers first ordered by label, then groups with an owner among the givers
-    ("Us"), also by label. A group appears only if it has gifts. A gift with no giver and no name is unassigned."""
+    ("Us"), also by label. A group appears only if it has gifts. A gift with no giver and no name is unassigned.
+    `ideas` are the person's ideas whose copy for them is open or held (idea JSON plus that `copy_state`); a taken
+    copy is its gift, already on the board."""
     occasions.get(con, occasion_id)  # 404
     person = _protected_person(con, person_id)
     rows = con.execute("SELECT g.* FROM gifts g JOIN gift_recipients r ON r.gift_id = g.id "
@@ -138,4 +144,13 @@ def board(con, occasion_id: int, person_id: int) -> dict:
         grp["list_text"] = list_text(grp["label"], grp["gifts"])
     return {"person": {"id": person["id"], "name": person["name"], "color": person["color"]},
             "unassigned": unassigned, "givers": ordered, "split": split,
-            "evenness": _evenness(con, occasion_id, user_ids)}
+            "evenness": _evenness(con, occasion_id, user_ids), "ideas": _open_ideas(con, person_id)}
+
+
+def _open_ideas(con, person_id: int) -> list[dict]:
+    out = []
+    for idea in ideas.list_json(con, unlocked=True, person_id=person_id):  # the board is behind the unlock
+        state = next(p["state"] for p in idea["people"] if p["person_id"] == person_id)
+        if state != "taken":
+            out.append({**idea, "copy_state": state})
+    return out

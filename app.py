@@ -471,6 +471,21 @@ def ideas_list():
     return jsonify(ideas.list_json(db(), unlocked=unlocked(), person_id=None if person is None else int(person)))
 
 
+@app.get("/api/ideas/share")
+@family_only
+def ideas_share():
+    """{text}: the shared ideas still open for each person, to paste to family. ?people=1,2,3 picks the people (a
+    protected one while locked is 423); without it, everyone this request may see."""
+    raw = request.args.get("people")
+    person_ids = None
+    if raw is not None:
+        parts = raw.split(",")
+        if not all(p.isascii() and p.isdigit() for p in parts):
+            raise ApiError(400, "people must be a list of person ids.")
+        person_ids = [int(p) for p in parts]
+    return jsonify(text=ideas.share_text(db(), person_ids, unlocked=unlocked()))
+
+
 @app.post("/api/ideas")
 @family_only
 def ideas_create():
@@ -503,6 +518,37 @@ def ideas_delete(idea_id):
     visible_idea(idea_id)
     ideas.delete(db(), idea_id)
     return jsonify(ok=True)
+
+
+@app.post("/api/ideas/<int:idea_id>/take/<int:person_id>")
+@family_only
+def ideas_take(idea_id, person_id):
+    """{giver_ids, giver_name?, occasion_id?}: a gift from this person's copy of the idea, 201 with the gift. Works
+    while locked for an idea that is not protected (all its people are then unprotected too)."""
+    visible_idea(idea_id)
+    data = json_body()
+    refuse_locked_write(data)
+    gid = ideas.take(db(), g.user, idea_id, person_id, data)
+    return jsonify(gift_json(visible_gift(gid))), 201
+
+
+@app.post("/api/gifts/<int:gift_id>/back-to-ideas")
+@family_only
+def gifts_back_to_ideas(gift_id):
+    """Delete a gift taken from an idea, which reopens that copy."""
+    visible_gift(gift_id)
+    if not ideas.is_idea_gift(db(), gift_id):
+        raise ApiError(400, "This gift did not come from an idea.")
+    wishlist.delete_gift(db(), gift_id)  # gifts.delete, releasing a linked wish's reservation
+    return jsonify(ok=True)
+
+
+@app.post("/api/gifts/<int:gift_id>/to-idea")
+@family_only
+def gifts_to_idea(gift_id):
+    """An unassigned gift becomes an idea for its recipients; 201 with the idea."""
+    visible_gift(gift_id)
+    return jsonify(visible_idea(ideas.to_idea(db(), g.user, gift_id))), 201
 
 
 # -- budgets

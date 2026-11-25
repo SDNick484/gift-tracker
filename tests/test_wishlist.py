@@ -502,7 +502,7 @@ def add(client, ids, item_id, pid=None):
 def test_with_the_feature_off_the_board_is_unchanged_and_the_routes_are_404(client, ids, unlock):
     unlock()
     link_tab(client, ids.kid1, 3)
-    assert set(board(client, ids)) == {"person", "unassigned", "givers", "split", "evenness"}
+    assert set(board(client, ids)) == {"person", "unassigned", "givers", "split", "evenness", "ideas"}
     missing = client.get("/api/nothing-here", headers=auth()).get_json()
     for method, path in all_routes(ids):
         r = client.open(path, method=method, json={}, headers=mut())

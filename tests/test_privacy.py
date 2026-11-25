@@ -11,6 +11,7 @@ import pytest
 from flask import url_for
 
 import app as tracker
+import ideas
 from conftest import PIN, auth, con_rows, mk_gift, mk_protected_gift, mut, set_pin
 
 MARKERS = ("zz-secret", "santa", "38888", "38889", "77777")   # lowercased; the last three are the shared gift's price and shares
@@ -23,7 +24,8 @@ def world(client, ids, clock):
     shared = mk_protected_gift(ids, title="ZZ-SECRET-GIFT", to=[ids.kid1, ids.jordan], frm=[ids.alex, ids.sam],
                                santa=True, price=77777, status="arrived", url="https://example.com/zz-secret-url",
                                store="ZZ-SECRET-STORE", notes="ZZ-SECRET-NOTE")
-    theirs = mk_protected_gift(ids, title="ZZ-SECRET-THEIRS", to=[ids.kid2], frm=[ids.casey])
+    theirs = mk_protected_gift(ids, title="ZZ-SECRET-THEIRS", to=[ids.kid2], frm=[ids.casey],
+                               giver_name="ZZ-SECRET-GIVER")
     idea = mk_protected_gift(ids, title="ZZ-SECRET-IDEA", to=[ids.kid3], frm=[])
     visible = mk_gift(client, ids.o, "VISIBLE-GIFT", to=[ids.jordan], frm=[ids.alex], price="12.34")
     # Santa on the visible gift goes in directly: through the API it needs the unlock.
@@ -32,14 +34,17 @@ def world(client, ids, clock):
     c = db.connect(settings.DB_PATH)
     c.execute("UPDATE gifts SET santa = 1 WHERE id = ?", (visible,))
     # Ideas (ideas.py): one tagged with a protected child and Jordan, inserted past the lock, and a visible control.
-    import ideas
     user = {"email": "alex@example.com", "name": "Alex"}
     secret_idea = ideas.create(c, user, {"title": "ZZ-SECRET-IDEA-ROW", "person_ids": [ids.kid1, ids.jordan],
                                          "store": "ZZ-SECRET-STORE", "share": True})
     visible_idea = ideas.create(c, user, {"title": "VISIBLE-IDEA", "person_ids": [ids.jordan]})
+    # An idea for Jordan alone whose copy was taken by the shared protected gift: protected through that gift.
+    taken_idea = ideas.create(c, user, {"title": "ZZ-SECRET-TAKEN-IDEA", "person_ids": [ids.jordan], "share": True})
+    c.execute("UPDATE idea_people SET gift_id = ? WHERE idea_id = ?", (shared, taken_idea))
     c.close()
     return types.SimpleNamespace(ids=ids, group=group, shared=shared, theirs=theirs, idea=idea, visible=visible,
-                                 secret=(shared, theirs, idea), secret_idea=secret_idea, visible_idea=visible_idea)
+                                 secret=(shared, theirs, idea), secret_idea=secret_idea, visible_idea=visible_idea,
+                                 taken_idea=taken_idea)
 
 
 def args(w):
@@ -48,7 +53,7 @@ def args(w):
     return {
         "gift_id": [*w.secret, w.visible, 999999],
         # the ideas this file's world makes; other files' worlds (test_school, test_exchanges, test_cogiver) have none
-        "idea_id": [*(getattr(w, k) for k in ("secret_idea", "visible_idea") if hasattr(w, k)), 999999],
+        "idea_id": [*(getattr(w, k) for k in ("secret_idea", "taken_idea", "visible_idea") if hasattr(w, k)), 999999],
         "occasion_id": [i.o],
         "person_id": [i.kid1, i.kid2, i.kid3, i.jordan, i.casey, i.alex],
         "group_id": [w.group],
@@ -102,7 +107,7 @@ def protected_state():
     unchanged."""
     prot = ("SELECT g.id FROM gifts g WHERE EXISTS (SELECT 1 FROM gift_recipients r JOIN people p ON p.id = r.person_id "
             "WHERE r.gift_id = g.id AND p.protected = 1)")
-    prot_idea = ("SELECT ip.idea_id FROM idea_people ip JOIN people p ON p.id = ip.person_id WHERE p.protected = 1")
+    prot_idea = f"SELECT i.id FROM ideas i WHERE {ideas.PROTECTED_SQL}"
     return (
         con_rows(f"SELECT * FROM gifts WHERE id IN ({prot}) ORDER BY id"),
         con_rows(f"SELECT * FROM gift_recipients WHERE gift_id IN ({prot}) ORDER BY gift_id, person_id"),
@@ -132,6 +137,8 @@ def test_the_walk_would_catch_a_leak(client, world, unlock):
     seen = walk_gets(client, world, query=("",))
     assert any("ZZ-SECRET-GIFT" in t for t in seen.values())
     assert any("ZZ-SECRET-IDEA-ROW" in t for t in seen.values())
+    assert any("ZZ-SECRET-TAKEN-IDEA" in t for t in seen.values())
+    assert any("ZZ-SECRET-GIVER" in t for t in seen.values())   # /api/giver-names
     assert any('"santa"' in t for t in seen.values())
 
 
@@ -214,7 +221,7 @@ def test_no_locked_mutation_changes_or_reveals_a_protected_gift(client, world):
                     assert not leaks(r.get_data(as_text=True)), (method, url)
                     if values.get("gift_id") in world.secret:
                         assert r.status_code in (404, 423), (method, url, r.status_code)
-                    if values.get("idea_id") == world.secret_idea:
+                    if values.get("idea_id") in (world.secret_idea, world.taken_idea):
                         assert r.status_code in (404, 423), (method, url, r.status_code)
                     assert protected_state() == before, (method, url, body)
     assert sent > 50

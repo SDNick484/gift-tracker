@@ -35,6 +35,8 @@ PROTECTED_SQL = ("(EXISTS (SELECT 1 FROM gift_recipients pr JOIN people pp ON pp
 GIVER_NAME_MAX = 80  # the wishlist's `by` limit (wishlist.LABEL_MAX)
 ABSENT = object()    # giver_name_of: the body does not name giver_name
 EXCHANGE_NAME = "A gift for an exchange is from the drawer: no typed name."
+BACK_TO_IDEAS = "Send it back to ideas instead."
+TAKEN = "Someone just took this. Reload."
 
 
 def track(giver_ids: set[int], user_ids: set[int], giver_name: str | None = None) -> str:
@@ -131,6 +133,18 @@ def history(con, person_id: int, *, unlocked: bool) -> list:
         (person_id, int(unlocked))).fetchall()
 
 
+def from_idea(con, gift_id: int) -> bool:
+    """Whether the gift was taken from an idea: some copy (idea_people) names it. Such a gift always has a giver;
+    clearing them all is 400 (refuse_no_giver), since sending it back to ideas is what that would mean."""
+    return con.execute("SELECT 1 FROM idea_people WHERE gift_id = ?", (gift_id,)).fetchone() is not None
+
+
+def refuse_no_giver(con, gift_id: int, giver_ids, giver_name) -> None:
+    """400 when these givers are nobody and the gift came from an idea."""
+    if not giver_ids and not giver_name and from_idea(con, gift_id):
+        raise ApiError(400, BACK_TO_IDEAS)
+
+
 def giver_names(con, *, unlocked: bool) -> list[str]:
     """Typed giver names to suggest: distinct case-insensitively (the most recent spelling wins), most recently used
     first, at most 50. Only gifts this request may see count, so a name used only on a hidden gift is not offered."""
@@ -195,9 +209,13 @@ def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int], exchange_
 
 
 # ---------------------------------------------------------------- writing
-def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) -> int:
+def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None,
+           idea_copy: tuple[int, int] | None = None) -> int:
     """`wishlist_item_id` links the new gift to a wish (wishlist.add_wish only; never read from a request body). One
-    gift per wish: a second link raises sqlite3.IntegrityError and nothing is created."""
+    gift per wish: a second link raises sqlite3.IntegrityError and nothing is created.
+
+    `idea_copy` = (idea_id, person_id) marks that copy of an idea taken by the new gift (ideas.take), in the same
+    transaction and only while it is still open: a copy someone else took first is 409 and the gift is rolled back."""
     f = _fields(data, partial=False)
     recipients = _person_ids(con, data, "recipient_ids")
     if not recipients:
@@ -236,6 +254,10 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) 
             exchanges.check_gift(con, gid)  # 400 / 409 roll the gift back
         if wishlist_item_id is not None:
             con.execute("UPDATE gifts SET wishlist_item_id = ? WHERE id = ?", (wishlist_item_id, gid))
+        if idea_copy is not None and not con.execute(
+                "UPDATE idea_people SET gift_id = ? WHERE idea_id = ? AND person_id = ? AND gift_id IS NULL",
+                (gid, *idea_copy)).rowcount:
+            raise ApiError(409, TAKEN)
     return gid
 
 
@@ -276,8 +298,13 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
             have = set(_ids(con, "gift_recipients", gift_id))
             con.executemany("DELETE FROM gift_recipients WHERE gift_id = ? AND person_id = ?",
                             [(gift_id, p) for p in have - set(recipients)])
+            # A recipient taken off reopens their copy of the idea the gift came from, if any.
+            con.executemany("UPDATE idea_people SET gift_id = NULL WHERE gift_id = ? AND person_id = ?",
+                            [(gift_id, p) for p in have - set(recipients)])
             con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)",
                             [(gift_id, p) for p in recipients if p not in have])
+        if givers is not None or name is not ABSENT:  # after the recipients: one taken off reopens their copy
+            refuse_no_giver(con, gift_id, _ids(con, "gift_givers", gift_id), _row(con, gift_id)["giver_name"])
         if santa is not None:
             _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con), link,
                          _row(con, gift_id)["giver_name"])
