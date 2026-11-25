@@ -78,8 +78,9 @@ const renderStore = g => (g.store ? ` · ${esc(g.store)}` : "");
 const renderWishBadge = g => (g.wish ? ` <span class="badge ${esc(wishBadgeClass(g))}">${esc(wishBadge(g))}</span>` : "");
 const renderGiftLine = g => `<span class="badge">${esc(g.status)}</span>${renderStore(g)}${renderTold(g)}${renderWishBadge(g)}`;
 
-// An old gift with no giver (not one taken from an idea) can become an idea for its recipients.
-const renderToIdea = g => (!hasGiver(g) && !g.from_idea
+// An old gift with no giver (not one taken from an idea), still at the idea status, can become an idea for its
+// recipients.
+const renderToIdea = g => (!hasGiver(g) && !g.from_idea && g.status === "idea"
   ? `<button type="button" class="btn small" data-to-idea="${esc(g.id)}">Move to ideas</button>` : "");
 const renderNameSlot = (kind, id) => `<div class="slot" data-name-slot="${esc(kind)}-${esc(id)}"></div>`;
 

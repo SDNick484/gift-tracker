@@ -764,3 +764,12 @@ def test_adding_a_protected_recipient_to_one_copy_of_a_shared_taken_idea_is_400(
     assert con_rows("SELECT person_id FROM gift_recipients WHERE gift_id = ?", g1) == [(ids.jordan,)]
     assert con_rows("SELECT title FROM gifts WHERE id = ?", g1) == [("Kite",)]
 
+
+
+def test_to_idea_needs_the_idea_status(client, ids, con):
+    gift = mk_gift(client, ids.o, "Puzzle", to=[ids.jordan])
+    con.execute("UPDATE gifts SET status = 'decided' WHERE id = ?", (gift,))
+    r = client.post(f"/api/gifts/{gift}/to-idea", json={}, headers=mut())
+    assert (r.status_code, r.get_json()) == (400, {"error": "Only an idea that is not yet ordered can be moved to ideas."})
+    assert con_rows("SELECT COUNT(*) FROM ideas") == [(0,)]
+    assert client.get(f"/api/gifts/{gift}", headers=auth()).status_code == 200

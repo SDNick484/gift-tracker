@@ -1434,6 +1434,19 @@ test("board: a typed giver renders escaped; Unassign on an idea gift is Back to 
   assert.ok(!empty.includes("<h3>Unassigned</h3>") && !empty.includes("<h3>Ideas</h3>"), "nothing to show: no section");
 });
 
+test("Move to ideas only for a gift still at the idea status, on the board and the gift page", () => {
+  for (const status of ["decided", "ordered", "arrived", "wrapped", "given"]) {
+    const html = renderBoard(board({ unassigned: [bgift({ status })] }), "Christmas", assignChoices(households, ppl5), ppl5);
+    assert.ok(!html.includes("data-to-idea="), status);
+    const page = renderGiftPage(fullGift({ giver_ids: [], giver_name: null, from_idea: false, status }), people4, "X", true);
+    assert.ok(!page.includes('id="to-idea"'), status);
+  }
+  const html = renderBoard(board({ unassigned: [bgift({ status: "idea" })] }), "Christmas", assignChoices(households, ppl5), ppl5);
+  assert.ok(html.includes('data-to-idea="20"'));
+  const page = renderGiftPage(fullGift({ giver_ids: [], giver_name: null, from_idea: false, status: "idea" }), people4, "X", true);
+  assert.ok(page.includes('id="to-idea"'));
+});
+
 test("board: the inline name form has the datalist, a bounded box and OK", () => {
   const html = renderNameForm("gift", 20);
   assert.ok(html.includes('data-form="giver-name" data-kind="gift" data-id="20"'));
@@ -1444,7 +1457,7 @@ test("board: the inline name form has the datalist, a bounded box and OK", () =>
 test("gift: Back to ideas for a gift from an idea, Move to ideas for an old giverless one, neither in school mode", () => {
   const fromIdea = renderGiftPage(fullGift({ giver_ids: [1], giver_name: null, from_idea: true }), people4, "X", true);
   assert.ok(fromIdea.includes('id="back-to-ideas"') && fromIdea.includes("Back to ideas") && !fromIdea.includes('id="to-idea"'));
-  const loose = renderGiftPage(fullGift({ giver_ids: [], giver_name: null, from_idea: false }), people4, "X", true);
+  const loose = renderGiftPage(fullGift({ giver_ids: [], giver_name: null, from_idea: false, status: "idea" }), people4, "X", true);
   assert.ok(loose.includes('id="to-idea"') && loose.includes("Move to ideas") && !loose.includes('id="back-to-ideas"'));
   const named = renderGiftPage(fullGift({ giver_ids: [], giver_name: "Aunt Jo", from_idea: false }), people4, "X", true);
   assert.ok(!named.includes('id="to-idea"') && !named.includes('id="back-to-ideas"'), "a gift with a giver moves nowhere");
@@ -1551,7 +1564,7 @@ test("gift screen: Back to ideas and Move to ideas post to their routes and leav
   globalThis.location = { hash: "#/gift/10" };
   t.after(() => { delete globalThis.location; });
   for (const [over, id, path] of [[{ giver_ids: [1], giver_name: null, from_idea: true }, "#back-to-ideas", "back-to-ideas"],
-    [{ giver_ids: [], giver_name: null, from_idea: false }, "#to-idea", "to-idea"]]) {
+    [{ giver_ids: [], giver_name: null, from_idea: false, status: "idea" }, "#to-idea", "to-idea"]]) {
     const h = giftHarness({ gift: orderGift(over), handler: () => null });
     const button = { handlers: {}, addEventListener(type, f) { this.handlers[type] = f; } };
     const base = h.view.querySelector;

@@ -126,11 +126,13 @@ const renderGiverName = (gift, names) => (gift.giver_name === undefined ? "" : `
         <label class="field"><span>Someone else</span><input name="giver_name" type="text" maxlength="80" list="giver-names" value="${esc(gift.giver_name ?? "")}" placeholder="A name"></label>
         <datalist id="giver-names">${renderNameOptions(names)}</datalist>`);
 
-// Back to ideas for a gift taken from an idea; Move to ideas for an old gift with nobody giving it. Family only.
+// Back to ideas for a gift taken from an idea; Move to ideas for an old gift with nobody giving it, still at the idea
+// status (the server refuses one further along: an idea keeps no status or order). Family only.
 const renderMoves = gift => {
   if (typeof gift.from_idea !== "boolean") return "";
   if (gift.from_idea) return `<button class="btn" type="button" id="back-to-ideas">Back to ideas</button>`;
-  return gift.giver_ids.length || gift.giver_name ? "" : `<button class="btn" type="button" id="to-idea">Move to ideas</button>`;
+  return gift.giver_ids.length || gift.giver_name || gift.status !== "idea"
+    ? "" : `<button class="btn" type="button" id="to-idea">Move to ideas</button>`;
 };
 
 const renderSantaBox = gift => (typeof gift.santa === "boolean"

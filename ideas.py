@@ -71,6 +71,7 @@ def visible(con, idea_id: int, *, unlocked: bool) -> bool:
 
 HELD = "Someone already has this on the wishlist. Reload."
 ALSO_LOCKED = "This idea is also for someone behind the lock. Make a separate idea for this person."
+NOT_IDEA_STATUS = "Only an idea that is not yet ordered can be moved to ideas."
 WISH_ONE_PERSON = "A wish is for one person."
 ON_A_BOARD = "This wish is already on a board. Reload."
 
@@ -250,8 +251,9 @@ def to_idea(con, user: dict, gift_id: int) -> int:
     """Turn an unassigned gift into an idea and delete the gift, in one transaction; answers the idea id. Its
     recipients become the tagged people, with the same title, link, store, price, notes and wish; share is off. The
     wish moves from the gift to the idea, and an unassigned gift holds no reservation, so the wishlist hears nothing.
-    400 for a gift taken from an idea (send it back instead), a gift someone gives, or a wish-linked gift for several
-    people (a wish is for one person)."""
+    400 for a gift taken from an idea (send it back instead), a gift someone gives, a gift past the idea status (an
+    idea has no status, order fields or hiding place to keep them), or a wish-linked gift for several people (a wish
+    is for one person)."""
     gifts.get(con, gift_id)  # 404
     now = common.now()
     try:
@@ -264,6 +266,8 @@ def to_idea(con, user: dict, gift_id: int) -> int:
             recipients = gifts._ids(con, "gift_recipients", gift_id)
             if gifts._ids(con, "gift_givers", gift_id) or row["giver_name"]:
                 raise ApiError(400, "Only a gift nobody is giving yet can move to ideas.")
+            if row["status"] != "idea":  # its status, order fields and hiding place have no place on an idea
+                raise ApiError(400, NOT_IDEA_STATUS)
             if row["wishlist_item_id"] is not None and len(recipients) > 1:
                 raise ApiError(400, "Remove the other recipients first.")
             # Directly, not through wishlist.delete_gift: an unassigned gift holds no wishlist reservation (the
