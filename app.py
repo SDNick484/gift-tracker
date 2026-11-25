@@ -345,6 +345,7 @@ def gift_json(row):
         out.pop("santa", None)  # school mode has no Santa, whatever the column says
         out.pop("location_id", None)  # nor hiding places
         out.pop("location_path", None)
+        out.pop("giver_name", None)  # nor typed givers
     return out
 
 
@@ -442,6 +443,13 @@ def person_history(person_id):
     return jsonify(person=people.get_person(db(), person_id),
                    gifts=[{**gift_json(r), "occasion": {"id": r["occasion_id"], "name": r["occasion_name"],
                                                          "date": r["occasion_date"]}} for r in rows])
+
+
+@app.get("/api/giver-names")
+@family_only
+def giver_names():
+    """Typed giver names to suggest, most recently used first; a name used only on a hidden gift is left out."""
+    return jsonify(gifts.giver_names(db(), unlocked=unlocked()))
 
 
 # -- ideas (family only). As for gifts: while locked, a protected idea (a protected person tagged, or a copy taken by
@@ -549,10 +557,12 @@ def person_board(occasion_id, person_id):
 @family_only
 @unlock_required
 def gifts_assign(gift_id):
-    """{giver_ids, expected_giver_ids}: 409 when the givers are no longer the ones the caller saw."""
+    """{giver_ids, expected_giver_ids, giver_name?, expected_giver_name?}: 409 when the givers are no longer the ones
+    the caller saw."""
     visible_gift(gift_id)
-    giver_ids, expected = boards.parse_assign(json_body())
-    wishlist.assign(db(), gift_id, giver_ids, expected)  # boards.assign, and a linked wish reserved or released
+    giver_ids, expected, name, expected_name = boards.parse_assign(json_body())
+    # boards.assign, and a linked wish reserved or released
+    wishlist.assign(db(), gift_id, giver_ids, expected, giver_name=name, expected_giver_name=expected_name)
     return jsonify(gift_json(visible_gift(gift_id)))
 
 

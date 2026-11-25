@@ -6,8 +6,9 @@ Visibility: a gift with any protected recipient is protected. While locked it is
 list gifts take a required `unlocked` and filter on PROTECTED_SQL, and app.py checks visible() before any read or
 write of one gift. create/update/set_status/set_givers do not look at the lock; app.py refuses locked writes.
 
-A gift's track follows its givers. It is "ours" when no giver is set or an owner (a user) is among them, and
-"theirs" when only other people give it. Money is integer cents (common.parse_cents)."""
+A gift's givers are people plus at most one typed name (`giver_name`, for a one-off giver who is not a person). Its
+track follows them: "ours" when no giver and no name is set or an owner (a user) is among the people, and "theirs"
+otherwise. Money is integer cents (common.parse_cents)."""
 import common
 import db
 import exchanges
@@ -31,8 +32,35 @@ PROTECTED_SQL = ("(EXISTS (SELECT 1 FROM gift_recipients pr JOIN people pp ON pp
                  "WHERE pg.gift_id = g.id AND pq.protected = 1)))")
 
 
-def track(giver_ids: set[int], user_ids: set[int]) -> str:
-    return "ours" if not giver_ids or giver_ids & user_ids else "theirs"
+GIVER_NAME_MAX = 80  # the wishlist's `by` limit (wishlist.LABEL_MAX)
+ABSENT = object()    # giver_name_of: the body does not name giver_name
+EXCHANGE_NAME = "A gift for an exchange is from the drawer: no typed name."
+
+
+def track(giver_ids: set[int], user_ids: set[int], giver_name: str | None = None) -> str:
+    return "ours" if (not giver_ids and not giver_name) or giver_ids & user_ids else "theirs"
+
+
+def parse_giver_name(value, key: str = "giver_name") -> str | None:
+    """A typed giver name: trimmed, 1 to GIVER_NAME_MAX characters; empty or None is None (no name)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ApiError(400, f"{key} must be text.")
+    value = value.strip()
+    if len(value) > GIVER_NAME_MAX:
+        raise ApiError(400, f"A giver's name is 1 to {GIVER_NAME_MAX} characters.")
+    return value or None
+
+
+def giver_name_of(data: dict):
+    """data["giver_name"] parsed (parse_giver_name), or ABSENT when the body does not name it. Typed givers are
+    family-only: naming one at all in school mode is 400."""
+    if "giver_name" not in data:
+        return ABSENT
+    if common.is_school():
+        raise ApiError(400, "Typed givers are not used in school mode.")
+    return parse_giver_name(data["giver_name"])
 
 
 def _statuses(trk: str) -> tuple[str, ...]:
@@ -71,9 +99,9 @@ def visible(con, gift_id: int, *, unlocked: bool) -> bool:
 def to_json(con, row, *, unlocked: bool) -> dict:
     recipients, givers = _ids(con, "gift_recipients", row["id"]), _ids(con, "gift_givers", row["id"])
     out = {"id": row["id"], "occasion_id": row["occasion_id"], "title": row["title"], "status": row["status"],
-           "track": track(set(givers), people.user_person_ids(con)), "url": row["url"], "store": row["store"],
-           "price_cents": row["price_cents"], "notes": row["notes"], "recipient_ids": recipients,
-           "giver_ids": givers, "told_at": row["told_at"], "created_by": row["created_by"],
+           "track": track(set(givers), people.user_person_ids(con), row["giver_name"]), "url": row["url"],
+           "store": row["store"], "price_cents": row["price_cents"], "notes": row["notes"], "recipient_ids": recipients,
+           "giver_ids": givers, "giver_name": row["giver_name"], "told_at": row["told_at"], "created_by": row["created_by"],
            "updated_at": row["updated_at"], **orders.to_json(con, row), "location_id": row["location_id"],
            "location_path": locations.path_map(con).get(row["location_id"]) if row["location_id"] else None,
            "exchange_id": row["exchange_id"]}
@@ -101,6 +129,18 @@ def history(con, person_id: int, *, unlocked: bool) -> list:
         "JOIN gift_recipients r ON r.gift_id = g.id JOIN occasions o ON o.id = g.occasion_id "
         f"WHERE r.person_id = ? AND (? OR NOT {PROTECTED_SQL}) ORDER BY o.date DESC, g.id",
         (person_id, int(unlocked))).fetchall()
+
+
+def giver_names(con, *, unlocked: bool) -> list[str]:
+    """Typed giver names to suggest: distinct case-insensitively (the most recent spelling wins), most recently used
+    first, at most 50. Only gifts this request may see count, so a name used only on a hidden gift is not offered."""
+    out: dict[str, str] = {}
+    for r in con.execute(f"SELECT g.giver_name FROM gifts g WHERE g.giver_name IS NOT NULL AND (? OR NOT {PROTECTED_SQL}) "
+                         "ORDER BY g.updated_at DESC, g.id DESC", (int(unlocked),)):
+        out.setdefault(r[0].casefold(), r[0])
+        if len(out) == 50:
+            break
+    return list(out.values())
 
 
 # ---------------------------------------------------------------- validation
@@ -147,10 +187,10 @@ def item_fields(data: dict, partial: bool, noun: str) -> dict:
     return out
 
 
-def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int], exchange_id=None) -> None:
+def _check_santa(santa: bool, giver_ids: set[int], user_ids: set[int], exchange_id=None, giver_name=None) -> None:
     if santa and exchange_id is not None:
         raise ApiError(400, "A gift for an exchange is from the drawer, never from Santa.")
-    if santa and not (track(giver_ids, user_ids) == "ours" and giver_ids & user_ids):
+    if santa and not (track(giver_ids, user_ids, giver_name) == "ours" and giver_ids & user_ids):
         raise ApiError(400, "Santa is only for a gift from an owner.")
 
 
@@ -163,28 +203,32 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) 
     if not recipients:
         raise ApiError(400, "A gift needs at least one recipient.")
     givers = _person_ids(con, data, "giver_ids") or []
+    name = giver_name_of(data)
+    name = None if name is ABSENT else name
     exchange_id = exchanges.exchange_id_of(con, data) if "exchange_id" in data else None
+    if exchange_id is not None and name:
+        raise ApiError(400, EXCHANGE_NAME)
     givers = exchanges.expand_givers(con, givers, exchange_id)  # a protected drawer's gift is also from the owners
     occasion_id = data.get("occasion_id")
     if isinstance(occasion_id, bool) or not isinstance(occasion_id, int) or not con.execute(
             "SELECT 1 FROM occasions WHERE id = ?", (occasion_id,)).fetchone():
         raise ApiError(400, "A gift needs an existing occasion.")
     user_ids = people.user_person_ids(con)
-    trk = track(set(givers), user_ids)
+    trk = track(set(givers), user_ids, name)
     status = data.get("status")
     if status is None:
         status = "idea" if trk == "ours" else "told"
     elif status not in _statuses(trk):
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
     santa = bool(flag(data, "santa", False))
-    _check_santa(santa, set(givers), user_ids, exchange_id)
+    _check_santa(santa, set(givers), user_ids, exchange_id, name)
     now = common.now()
     with db.transaction(con):
         gid = con.execute(
             "INSERT INTO gifts (occasion_id, title, status, santa, url, store, price_cents, notes, told_at, "
-            "created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "giver_name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (occasion_id, f["title"], status, int(santa), f.get("url"), f.get("store"), f.get("price_cents"),
-             f.get("notes"), common.today() if trk == "theirs" else None, user["email"], now, now)).lastrowid
+             f.get("notes"), common.today() if trk == "theirs" else None, name, user["email"], now, now)).lastrowid
         con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)", [(gid, p) for p in recipients])
         con.executemany("INSERT INTO gift_givers (gift_id, person_id) VALUES (?, ?)", [(gid, p) for p in givers])
         if exchange_id is not None:
@@ -196,9 +240,10 @@ def create(con, user: dict, data: dict, *, wishlist_item_id: int | None = None) 
 
 
 def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_write=None) -> None:
-    """Change title, url, store, price, notes, recipients, givers, Santa, the order fields (orders.FIELDS), the
-    hiding place (location_id), the exchange it is a gift for (exchange_id) or the status. A changed giver list can change the track, with the consequences
-    set_givers describes; Santa is checked against the result; a status goes through the same rules as
+    """Change title, url, store, price, notes, recipients, givers (people, and the typed name: giver_name_of),
+    Santa, the order fields (orders.FIELDS), the hiding place (location_id), the exchange it is a gift for
+    (exchange_id, which refuses a typed name) or the status. A changed giver list can change the track, with the
+    consequences set_givers describes; Santa is checked against the result; a status goes through the same rules as
     set_status, ordered included. All of it applies or none of it. `after_write()` runs inside the transaction after
     the local write (wishlist.update); if it raises, nothing is written."""
     old = _row(con, gift_id)
@@ -211,18 +256,21 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
     if recipients is not None and not recipients:
         raise ApiError(400, "A gift needs at least one recipient.")
     givers = _person_ids(con, data, "giver_ids")
+    name = giver_name_of(data)
     santa = flag(data, "santa")
     if "exchange_id" in data:
         f["exchange_id"] = exchanges.exchange_id_of(con, data)
     link = f["exchange_id"] if "exchange_id" in data else old["exchange_id"]
+    if link is not None and (old["giver_name"] if name is ABSENT else name):
+        raise ApiError(400, EXCHANGE_NAME)
     if link is not None and "exchange_id" in data and (old["santa"] if santa is None else santa):
         raise ApiError(400, "A gift for an exchange is from the drawer, never from Santa.")  # linking a Santa gift
     if link is not None and (givers is not None or "exchange_id" in data):
         # A protected drawer's gift is also from the owners; this runs on a new giver list and on a new link.
         givers = exchanges.expand_givers(con, _ids(con, "gift_givers", gift_id) if givers is None else givers, link)
     with db.transaction(con):
-        if givers is not None:
-            _set_givers(con, gift_id, givers)
+        if givers is not None or name is not ABSENT:
+            _set_givers(con, gift_id, _ids(con, "gift_givers", gift_id) if givers is None else givers, giver_name=name)
         if recipients is not None:
             # Change the set, not the rows: a recipient who stays keeps their detail and done flag (school mode).
             have = set(_ids(con, "gift_recipients", gift_id))
@@ -231,7 +279,8 @@ def update(con, gift_id: int, data: dict, actor: str | None = None, *, after_wri
             con.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)",
                             [(gift_id, p) for p in recipients if p not in have])
         if santa is not None:
-            _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con), link)
+            _check_santa(santa, set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con), link,
+                         _row(con, gift_id)["giver_name"])
             f["santa"] = int(santa)
         f["updated_at"] = common.now()
         con.execute(f"UPDATE gifts SET {', '.join(f'{k} = ?' for k in f)} WHERE id = ?", (*f.values(), gift_id))
@@ -265,7 +314,7 @@ def set_status(con, gift_id: int, status: str, order: dict | None = None, actor:
 def _apply_status(con, gift_id: int, status: str, order: dict, actor: str | None) -> None:
     """set_status inside the caller's transaction."""
     row = _row(con, gift_id)
-    trk = track(set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con))
+    trk = track(set(_ids(con, "gift_givers", gift_id)), people.user_person_ids(con), row["giver_name"])
     if status not in _statuses(trk):
         raise ApiError(400, f"On this gift's track, status must be one of {', '.join(_statuses(trk))}.")
     fields = orders.parse(con, order)
@@ -284,14 +333,15 @@ def set_givers(con, gift_id: int, giver_ids: list[int]) -> None:
         _set_givers(con, gift_id, ids)
 
 
-def _set_givers(con, gift_id: int, giver_ids: list[int]) -> None:
-    """Replace the givers. When that moves the gift to the other track its status maps across (to theirs:
-    told, to ours: decided; given stays given), and a gift no longer from an owner loses Santa. Runs inside the
-    caller's transaction."""
+def _set_givers(con, gift_id: int, giver_ids: list[int], *, giver_name=ABSENT) -> None:
+    """Replace the givers, and the typed name unless it is ABSENT (kept). When that moves the gift to the other track
+    its status maps across (to theirs: told, to ours: decided; given stays given), and a gift no longer from an owner
+    loses Santa. Runs inside the caller's transaction; the caller refuses a typed name on a gift for an exchange."""
     row = _row(con, gift_id)
+    name = row["giver_name"] if giver_name is ABSENT else giver_name
     user_ids = people.user_person_ids(con)
-    before = track(set(_ids(con, "gift_givers", gift_id)), user_ids)
-    after = track(set(giver_ids), user_ids)
+    before = track(set(_ids(con, "gift_givers", gift_id)), user_ids, row["giver_name"])
+    after = track(set(giver_ids), user_ids, name)
     con.execute("DELETE FROM gift_givers WHERE gift_id = ?", (gift_id,))
     con.executemany("INSERT INTO gift_givers (gift_id, person_id) VALUES (?, ?)", [(gift_id, p) for p in giver_ids])
     status, santa, told_at = row["status"], row["santa"], row["told_at"]
@@ -301,8 +351,8 @@ def _set_givers(con, gift_id: int, giver_ids: list[int]) -> None:
         told_at = common.today()
     if santa and not (after == "ours" and set(giver_ids) & user_ids):
         santa = 0  # Santa needs a giver who is an owner
-    con.execute("UPDATE gifts SET status = ?, santa = ?, told_at = ?, updated_at = ? WHERE id = ?",
-                (status, santa, told_at, common.now(), gift_id))
+    con.execute("UPDATE gifts SET status = ?, santa = ?, told_at = ?, giver_name = ?, updated_at = ? WHERE id = ?",
+                (status, santa, told_at, name, common.now(), gift_id))
 
 
 def delete(con, gift_id: int) -> None:

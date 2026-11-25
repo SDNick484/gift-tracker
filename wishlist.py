@@ -47,6 +47,7 @@ MAX_BYTES = 2 * 1024 * 1024   # the largest answer read; a feed over this is "un
 MAX_AGE = 60                  # a read refreshes a feed older than this many seconds
 RETRY_AFTER = 30              # ... unless the last attempt failed less than this many seconds ago
 LABEL_MAX = 80                # the wishlist cuts `by` at 80 characters
+assert gifts.GIVER_NAME_MAX == LABEL_MAX  # a typed giver name fits in `by` whole
 FEED_PATH = "/api/feed"
 PURCHASED = ("confirmed", "given")  # a theirs-track gift in one of these is purchased on the wishlist
 
@@ -330,12 +331,14 @@ def us_label(con) -> str:
     return next(iter(hs)) if len(hs) == 1 and next(iter(hs)) else people.US
 
 
-def label(con, giver_ids) -> str | None:
+def label(con, giver_ids, giver_name=None) -> str | None:
     """The `by` written for these givers, or None for no giver. Any owner among them is the owners' household label
     (so it is the same for Santa and not, and for one owner or both); anyone else is their household, else their
-    name. Distinct parts joined by " & ", at most LABEL_MAX characters. Takes nothing but the giver ids, on purpose."""
+    name; a typed giver name is one more part. Distinct parts joined by " & ", at most LABEL_MAX characters. Takes
+    nothing but the givers, on purpose."""
     ids = set(giver_ids or ())
-    if not ids:
+    name = (giver_name or "").strip()
+    if not ids and not name:
         return None
     owners = people.user_person_ids(con)
     parts = [us_label(con)] if ids & owners else []
@@ -344,6 +347,8 @@ def label(con, giver_ids) -> str | None:
         part = (r["household"] or r["name"]).strip() if r else ""
         if part and part not in parts:
             parts.append(part)
+    if name and name not in parts:
+        parts.append(name)
     return " & ".join(parts)[:LABEL_MAX].strip() or None
 
 
@@ -385,8 +390,8 @@ def _expected(con, gift_id: int) -> tuple[bool, str | None]:
     """What the wishlist should show for a linked gift: (purchased, by)."""
     row = gifts.get(con, gift_id)
     givers = exchanges.drawer_only(con, gift_id, gifts._ids(con, "gift_givers", gift_id))
-    trk = gifts.track(set(givers), people.user_person_ids(con))
-    return trk == "theirs" and row["status"] in PURCHASED, label(con, givers)
+    trk = gifts.track(set(givers), people.user_person_ids(con), row["giver_name"])
+    return trk == "theirs" and row["status"] in PURCHASED, label(con, givers, row["giver_name"])
 
 
 def _in_sync(it: dict, expected: tuple[bool, str | None]) -> bool:
@@ -615,9 +620,12 @@ def _write_through(con, gift_id: int, write, sync=_sync) -> None:
         raise
 
 
-def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int]) -> None:
+def assign(con, gift_id: int, giver_ids: list[int], expected_giver_ids: list[int], *, giver_name: str | None = None,
+           expected_giver_name: str | None = None) -> None:
     """boards.assign, and the wish reserved under the new givers' label (released when unassigned)."""
-    _write_through(con, gift_id, lambda hook: boards.assign(con, gift_id, giver_ids, expected_giver_ids, after_write=hook))
+    _write_through(con, gift_id, lambda hook: boards.assign(
+        con, gift_id, giver_ids, expected_giver_ids, after_write=hook, giver_name=giver_name,
+        expected_giver_name=expected_giver_name))
 
 
 def set_status(con, gift_id: int, status: str, order: dict | None, actor: str | None) -> None:
@@ -654,7 +662,7 @@ def refuse_agent_flip(con, gift_id: int, status) -> None:
         return
     row = gifts.get(con, gift_id)
     if gifts.track(set(exchanges.drawer_only(con, gift_id, gifts._ids(con, "gift_givers", gift_id))),
-                   people.user_person_ids(con)) != "theirs":
+                   people.user_person_ids(con), row["giver_name"]) != "theirs":
         return
     if (row["status"] in PURCHASED) != (status in PURCHASED):
         raise ApiError(409, "This gift is on the wishlist: change its status in the app.")

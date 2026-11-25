@@ -30,9 +30,10 @@ def shares(price_cents: int, recipient_ids: list[int]) -> dict[int, int]:
 
 
 def _gifts(con, occasion_id: int, include_protected: bool) -> list[dict]:
-    """The occasion's gifts with their recipients and givers, leaving out protected gifts unless asked."""
+    """The occasion's gifts with their recipients, givers and typed giver name, leaving out protected gifts unless
+    asked."""
     rows = con.execute(
-        f"SELECT g.id, g.title, g.status, g.price_cents, g.updated_at FROM gifts g "
+        f"SELECT g.id, g.title, g.status, g.price_cents, g.giver_name, g.updated_at FROM gifts g "
         f"WHERE g.occasion_id = ? AND (? OR NOT {gifts.PROTECTED_SQL}) ORDER BY g.id",
         (occasion_id, int(include_protected))).fetchall()
     links: dict[tuple[str, int], list[int]] = {}
@@ -47,7 +48,7 @@ def _gifts(con, occasion_id: int, include_protected: bool) -> list[dict]:
 def _totals(gift_list: list[dict], user_ids: set[int]) -> dict[int, dict]:
     out: dict[int, dict] = {}
     for gft in gift_list:
-        ours = gifts.track(set(gft["giver_ids"]), user_ids) == "ours"
+        ours = gifts.track(set(gft["giver_ids"]), user_ids, gft["giver_name"]) == "ours"
         split = shares(gft["price_cents"], gft["recipient_ids"]) if ours and gft["price_cents"] is not None else {}
         for pid in gft["recipient_ids"]:
             t = out.setdefault(pid, {"spent_cents": 0, "planned_cents": 0, "gift_count": 0})

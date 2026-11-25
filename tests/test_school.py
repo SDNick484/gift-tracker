@@ -19,7 +19,7 @@ FAMILY_ONLY = {"lock_set_pin", "lock_unlock", "lock_lock", "person_board", "gift
                "locations_list", "locations_create", "locations_update", "locations_delete", "lists_where",
                "wishlist_overview", "wishlist_refresh", "wishlist_add_wish", "wishlist_aliases_list",
                "wishlist_alias_set", "wishlist_alias_delete",
-               "ideas_list", "ideas_create", "ideas_get", "ideas_update", "ideas_delete"}
+               "ideas_list", "ideas_create", "ideas_get", "ideas_update", "ideas_delete", "giver_names"}
 SCHOOL_ONLY = {"school_matrix", "school_cell_set", "school_cell_remove", "school_role_add"}
 
 
