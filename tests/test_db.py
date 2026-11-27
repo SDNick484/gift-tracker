@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 import db
+import settings
 
 
 def test_migrate_creates_every_table(con):
@@ -331,7 +332,7 @@ def _v5_database(path):
     c.execute("INSERT INTO people (id, name, wishlist_person_id) VALUES (1, 'Kid 1', 3)")
     c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
     c.execute("INSERT INTO gifts (id, occasion_id, title, status, wishlist_item_id, created_by, created_at, updated_at) "
-              "VALUES (1, 1, 'Card', 'idea', 7, 'a', 0, 0)")
+              "VALUES (1, 1, 'Card', 'decided', 7, 'a', 0, 0)")
     c.execute("INSERT INTO gift_recipients (gift_id, person_id) VALUES (1, 1)")
     return c
 
@@ -407,7 +408,7 @@ def _v7_database(path):
     c.execute("INSERT INTO people (id, name) VALUES (1, 'Kid 1')")
     c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
     c.execute("INSERT INTO gifts (id, occasion_id, title, status, created_by, created_at, updated_at) "
-              "VALUES (1, 1, 'Card', 'idea', 'a', 0, 0)")
+              "VALUES (1, 1, 'Card', 'decided', 'a', 0, 0)")
     c.execute("INSERT INTO gift_recipients (gift_id, person_id) VALUES (1, 1)")
     return c
 
@@ -473,3 +474,64 @@ def test_ideas_one_per_wish(con):
     _idea(con)  # any number without a wish
     assert con.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] == 3
     assert con.execute("SELECT share FROM ideas").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- version 9: old ideas become ideas
+def _v8_database(path):
+    """A database exactly as version 8 left it: two people, a current and an archived occasion."""
+    c = db.connect(str(path))
+    for stmt in db._statements(db.SCHEMA):
+        c.execute(stmt)
+    for version in range(2, 9):
+        db.MIGRATIONS[version](c)
+    c.execute("INSERT INTO meta VALUES ('schema_version', '8')")
+    c.execute("INSERT INTO people (id, name) VALUES (1, 'Kid 1')")
+    c.execute("INSERT INTO people (id, name) VALUES (2, 'Jordan')")
+    c.execute("INSERT INTO occasions (id, name, kind, date) VALUES (1, 'Christmas 2026', 'christmas', '2026-12-25')")
+    c.execute("INSERT INTO occasions (id, name, kind, date, archived) VALUES (2, 'Christmas 2025', 'christmas', '2025-12-25', 1)")
+    return c
+
+
+def _old_gift(c, gid, title, to, *, occasion=1, status="idea", giver=None, name=None, wish=None):
+    c.execute("INSERT INTO gifts (id, occasion_id, title, status, url, store, price_cents, notes, wishlist_item_id, "
+              "giver_name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'https://example.com/x', 'Shop', "
+              "1250, 'note', ?, ?, 'alex@example.com', 5, 6)", (gid, occasion, title, status, wish, name))
+    c.executemany("INSERT INTO gift_recipients (gift_id, person_id) VALUES (?, ?)", [(gid, p) for p in to])
+    if giver:
+        c.execute("INSERT INTO gift_givers (gift_id, person_id) VALUES (?, ?)", (gid, giver))
+
+
+def test_v9_turns_old_idea_gifts_into_ideas(tmp_path):
+    c = _v8_database(tmp_path / "t.db")
+    _old_gift(c, 1, "Books", [1, 2], wish=None)
+    _old_gift(c, 2, "Wish", [1], wish=7)
+    _old_gift(c, 3, "Given", [1], giver=2)
+    _old_gift(c, 4, "Named", [1], name="Aunt Jo")
+    _old_gift(c, 5, "Decided", [1], status="decided")
+    _old_gift(c, 6, "Archived", [1], occasion=2)
+    _old_gift(c, 7, "Shared wish", [1, 2], wish=8)
+    _old_gift(c, 8, "Taken", [1])
+    taken_from = _idea(c, title="Source")
+    c.execute("INSERT INTO idea_people (idea_id, person_id, gift_id) VALUES (?, 1, 8)", (taken_from,))
+    db.migrate(c)
+    assert [r[0] for r in c.execute("SELECT id FROM gifts ORDER BY id")] == [3, 4, 5, 6, 7, 8]
+    made = [tuple(r) for r in c.execute("SELECT title, url, store, price_cents, notes, share, wishlist_item_id, created_by, "
+                                        "created_at, updated_at FROM ideas WHERE id != ? ORDER BY id", (taken_from,))]
+    assert made == [("Books", "https://example.com/x", "Shop", 1250, "note", 0, None, "alex@example.com", 5, 6),
+                    ("Wish", "https://example.com/x", "Shop", 1250, "note", 0, 7, "alex@example.com", 5, 6)]
+    tags = [tuple(r) for r in c.execute("SELECT i.title, ip.person_id, ip.gift_id FROM idea_people ip JOIN ideas i "
+                                        "ON i.id = ip.idea_id ORDER BY i.id, ip.person_id")]
+    assert tags == [("Source", 1, 8), ("Books", 1, None), ("Books", 2, None), ("Wish", 1, None)]
+    db.migrate(c)  # again: nothing changes
+    assert c.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] == 3
+    c.close()
+
+
+def test_v9_leaves_a_school_database_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "MODE", "school")
+    c = _v8_database(tmp_path / "t.db")
+    _old_gift(c, 1, "Mug", [1])
+    db.migrate(c)
+    assert c.execute("SELECT COUNT(*) FROM gifts").fetchone()[0] == 1
+    assert c.execute("SELECT COUNT(*) FROM ideas").fetchone()[0] == 0
+    c.close()

@@ -6,7 +6,7 @@ SCHEMA_VERSION; migrate() is idempotent and runs at every start, so the host nev
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Version 1. Statements are separated by ";" and contain none themselves (no triggers): see _statements().
 SCHEMA = """
@@ -203,6 +203,38 @@ def _to_v8(con):
 
 
 MIGRATIONS[8] = _to_v8
+
+
+# Version 9 (old ideas become ideas): before version 8 an idea was a gift at the `idea` status that nobody gives. Each
+# such gift in an occasion that is not archived becomes an idea for its recipients (same title, link, store, price,
+# notes, wish and creator; share off) and the gift is deleted, as ideas.to_idea does for one gift and under the same
+# conditions: no giver and no typed name, not taken from an idea, not an exchange gift, and a wish-linked gift only
+# when it is for one person. Family mode only: school mode has no ideas, and its gifts are left alone.
+def _to_v9(con):
+    import common  # late: common needs flask, which db.py must not need at import
+    if common.is_school():
+        return
+    rows = con.execute(
+        "SELECT g.* FROM gifts g JOIN occasions o ON o.id = g.occasion_id WHERE o.archived = 0 AND g.status = 'idea' "
+        "AND g.giver_name IS NULL AND g.exchange_id IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM gift_givers x WHERE x.gift_id = g.id) "
+        "AND NOT EXISTS (SELECT 1 FROM idea_people ip WHERE ip.gift_id = g.id) "
+        "AND (g.wishlist_item_id IS NULL OR ((SELECT COUNT(*) FROM gift_recipients r WHERE r.gift_id = g.id) = 1 "
+        "AND NOT EXISTS (SELECT 1 FROM ideas i WHERE i.wishlist_item_id = g.wishlist_item_id))) ORDER BY g.id").fetchall()
+    for g in rows:
+        recipients = [r[0] for r in con.execute("SELECT person_id FROM gift_recipients WHERE gift_id = ?", (g["id"],))]
+        if not recipients:
+            continue
+        con.execute("DELETE FROM gifts WHERE id = ?", (g["id"],))  # first: the idea takes over the wish link
+        iid = con.execute(
+            "INSERT INTO ideas (title, url, store, price_cents, notes, share, wishlist_item_id, created_by, created_at, "
+            "updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (g["title"], g["url"], g["store"], g["price_cents"], g["notes"], g["wishlist_item_id"], g["created_by"],
+             g["created_at"], g["updated_at"])).lastrowid
+        con.executemany("INSERT INTO idea_people (idea_id, person_id) VALUES (?, ?)", [(iid, p) for p in recipients])
+
+
+MIGRATIONS[9] = _to_v9
 
 
 def migrate(con):
