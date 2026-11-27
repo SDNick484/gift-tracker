@@ -1,5 +1,5 @@
-// #/idea  Quick idea: For (people, most recently used first; tick one or several), What, then an optional Link and
-// Store, and "Share with relatives" (off). An idea has no occasion and no giver: it is taken for one person later,
+// #/idea  Quick idea: For (people, most recently used first; tick one or several), What, then an optional Link,
+// Store and Price, and "Share with relatives" (off). An idea has no occasion and no giver: it is taken for one person later,
 // on #/ideas or a board. Save goes back to where the user came from.
 import { send } from "./api.js";
 import { choosablePeople, esc, recents, renderChecked, state, toast } from "./core.js";
@@ -19,12 +19,13 @@ export function backTarget(prev) {
   return prev && !prev.startsWith("#/idea") ? prev : "#/";
 }
 
-// The POST /api/ideas body from the form: every checked person, the title, link and store when typed, and share.
+// The POST /api/ideas body from the form: every checked person, the title, link, store and price when typed, and share.
 export function ideaBody(form) {
   const field = name => (form.elements[name]?.value ?? "").trim();
   const body = { title: field("what"), person_ids: [...form.querySelectorAll('input[name="for"]:checked')].map(i => Number(i.value)) };
   if (field("url")) body.url = field("url");
   if (field("store")) body.store = field("store");
+  if (field("price")) body.price = field("price");
   body.share = Boolean(form.elements.share?.checked);
   return body;
 }
@@ -38,6 +39,7 @@ const renderForm = (forList, preselect) => `
     <label class="field"><span>What</span><input name="what" type="text" maxlength="200" required autocapitalize="sentences" enterkeyhint="next"></label>
     <div class="two"><label class="field"><span>Link</span><input name="url" type="url" maxlength="2000" placeholder="optional" inputmode="url"></label>
       <label class="field"><span>Store</span><input name="store" type="text" maxlength="200" placeholder="optional"></label></div>
+    <label class="field"><span>Price</span><input name="price" type="text" inputmode="decimal" placeholder="optional"></label>
     <label class="check"><input type="checkbox" name="share"> Share with relatives</label>
     <p class="form-error" role="alert"></p>
     <div class="actions"><button class="btn primary" type="submit">Save</button><a class="btn" href="${esc(backTarget(state.prev))}">Cancel</a></div>

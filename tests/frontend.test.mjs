@@ -212,6 +212,8 @@ test("idea: the body is an idea for every checked person, blank link and store l
     { title: "Kite", person_ids: [3, 5], share: false });
   assert.deepEqual(ideaBody(ideaForm({ what: "Kite", url: " https://example.com/kite ", store: " Toy Shop ", share: true }, [4])),
     { title: "Kite", person_ids: [4], url: "https://example.com/kite", store: "Toy Shop", share: true });
+  assert.deepEqual(ideaBody(ideaForm({ what: "Kite", url: "", store: "", price: " 19.99 ", share: false }, [4])),
+    { title: "Kite", person_ids: [4], price: "19.99", share: false });
 });
 
 // ---------------------------------------------------------------- person.js
@@ -1474,21 +1476,22 @@ test("gift: From has a Someone else box with suggestions, and the sub-line names
   assert.ok(html.includes("from Pat &amp; &lt;i&gt;Uncle&lt;/i&gt; &quot;C&quot;"));
 });
 
-test("person: the person's open ideas with Take, the typed giver on a gift row, and no + Idea in school mode", () => {
+test("person: the person's open ideas as rows like gifts with Copy list, the typed giver on a gift row, and no + Idea in school mode", () => {
   const person = { id: 3, name: "Pat", color: null, household: null, active: true, protected: false };
   const occasion = { id: 1, name: "Christmas" };
-  const ideasForPat = [boardIdea({ id: 40, title: "<b>Kite</b>", people: [{ person_id: 3, state: "open", gift_id: null, occasion_id: null, held_by: null }] }),
+  const ideasForPat = [boardIdea({ id: 40, title: "<b>Kite</b>", store: "<u>Shop</u>", price_cents: 1999, share: true, people: [{ person_id: 3, state: "open", gift_id: null, occasion_id: null, held_by: null }] }),
     boardIdea({ id: 41, title: "Drone", people: [{ person_id: 3, state: "taken", gift_id: 9, occasion_id: 1, held_by: null }] })];
   const g = gift({ giver_ids: [], giver_name: "<i>Aunt</i>" });
   const html = renderPage(person, "", occasion, null, null, [g], [], people4, { ideas: ideasForPat, names: ["Jo"] });
   assert.ok(!/<b>|<i>/.test(html), html);
   assert.ok(html.includes("<h3>Ideas</h3>") && html.includes("&lt;b&gt;Kite&lt;/b&gt;") && !html.includes("Drone"), "open ideas only");
-  assert.ok(html.includes('data-take="40" data-person="3"') && html.includes('data-take-slot="40-3"'));
+  assert.ok(html.includes('<a class="main" href="#/ideas?person=3&amp;idea=40">') && !html.includes("data-take"), "the row opens the idea");
+  assert.ok(html.includes('<span class="badge">idea</span> &lt;u&gt;Shop&lt;/u&gt; · shared') && html.includes("$19.99"));
+  assert.ok(html.includes("data-copy-ideas") && html.includes("data-copy-box"));
   assert.ok(html.includes("from &lt;i&gt;Aunt&lt;/i&gt;"));
-  assert.ok(html.includes('<datalist id="giver-names"><option value="Jo"></option></datalist>'));
   assert.ok(html.includes('href="#/idea?for=3"'));
   const school = renderPage(person, "", occasion, null, null, [], [], people4, { school: true });
-  assert.ok(!school.includes("+ Idea") && !school.includes("#/idea") && !school.includes("<h3>Ideas</h3>"));
+  assert.ok(!school.includes("+ Idea") && !school.includes("#/idea") && !school.includes("<h3>Ideas</h3>") && !school.includes("data-copy-ideas"));
 });
 
 test("home: the Ideas link sits next to + Idea, with or without the counts", () => {
