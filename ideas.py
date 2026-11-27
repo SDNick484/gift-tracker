@@ -286,9 +286,20 @@ def to_idea(con, user: dict, gift_id: int) -> int:
 
 
 # ---------------------------------------------------------------- the share list
+def _money(cents: int) -> str:
+    return f"${cents // 100:,}.{cents % 100:02d}"
+
+
+def _share_line(row) -> str:
+    price = row["price_cents"]
+    parts = [row["title"], row["store"], None if price is None else _money(price), row["url"]]
+    return "- " + " - ".join(p for p in parts if p)
+
+
 def share_text(con, person_ids: list[int] | None, *, unlocked: bool) -> str:
     """The shared ideas still open for each person, as text to paste to family: per person (people sort order) with at
-    least one, their name and then "- <title>[ - <store>][ - <url>]" per idea (by id), a blank line between people.
+    least one, their name and then "- <title>[ - <store>][ - <price>][ - <url>]" per idea (by id), a blank line between
+    people. A taken copy (a gift exists, bought or not) is left out.
     `person_ids` None means everyone this request may see. Naming a missing person is 400, a protected one while
     locked 423. Protected ideas are left out while locked, whoever they are for."""
     if person_ids is not None:
@@ -302,7 +313,7 @@ def share_text(con, person_ids: list[int] | None, *, unlocked: bool) -> str:
                        (int(unlocked),)).fetchall()
     lines: dict[int, list[str]] = {}
     for row in rows:
-        line = "- " + "".join([row["title"], *(f" - {row[k]}" for k in ("store", "url") if row[k])])
+        line = _share_line(row)
         for c in con.execute("SELECT person_id FROM idea_people WHERE idea_id = ?", (row["id"],)):
             pid = c["person_id"]
             # a protected person is tagged only on protected ideas, which the query leaves out while locked

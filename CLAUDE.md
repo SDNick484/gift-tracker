@@ -138,7 +138,7 @@ Decisions in `docs/superpowers/plans/2026-11-24-ideas-and-typed-givers.md` and t
 - Typed giver: `gifts.giver_name` (trimmed, 1 to 80 characters, `""` or `null` clears; `gifts.parse_giver_name`). It is a giver for the track: `gifts.track(giver_ids, user_ids, giver_name)` is `ours` with no giver at all or an owner among the ids, else `theirs`. Every caller with a gift row passes its `giver_name`. Board groups key on `(giver_ids, giver_name)`; `wishlist.label(con, ids, giver_name)` appends the name as one more part. Santa still needs an owner among the ids.
 - Ideas, the share list, giver names, take, back to ideas and move to ideas are all `family_only`; a `giver_name` in a body in school mode is 400 and school gift JSON has no `giver_name` or `from_idea` key. `tests/test_school.py::FAMILY_ONLY` pins them.
 - `/api/v1` shows `giver_name` to `full` scope only (where `giver_ids` is shown) and never writes it: `agent.create_gift` with `giver_name` is 400. No v1 route is added and no MCP tool.
-- Deleting a person tagged on an idea is 409. The share flag defaults to off; the shared text carries title, store and link only, for people with an open copy.
+- Deleting a person tagged on an idea is 409. The share flag defaults to off; the shared text carries title, store, price and link only, for people with an open copy. The person screen lists open ideas as rows like gifts that open the idea on `#/ideas` (Take and Edit live there).
 
 ## File structure
 

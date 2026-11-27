@@ -592,12 +592,14 @@ def test_share_text_format(client, ids, unlock):
     mk_idea(client, "Secret plan", [ids.kid1])
     r = share(client, f"?people={ids.kid1},{ids.kid2},{ids.kid3}")
     assert r.status_code == 200, r.get_json()
-    assert r.get_json() == {"text": "Kid 1\n- Animal tracking bracelet - Shop - https://example.com/b\n\n"
+    assert r.get_json() == {"text": "Kid 1\n- Animal tracking bracelet - Shop - $5.00 - https://example.com/b\n\n"
                                     "Kid 2\n- Puzzle - https://example.com/p\n\n"
-                                    "Kid 3\n- Animal tracking bracelet - Shop - https://example.com/b"}
+                                    "Kid 3\n- Animal tracking bracelet - Shop - $5.00 - https://example.com/b"}
     assert share(client, f"?people={ids.kid3}").get_json() == \
-        {"text": "Kid 3\n- Animal tracking bracelet - Shop - https://example.com/b"}
+        {"text": "Kid 3\n- Animal tracking bracelet - Shop - $5.00 - https://example.com/b"}
     assert share(client, f"?people={ids.jordan}").get_json() == {"text": ""}
+    mk_idea(client, "Bike", [ids.jordan], share=True, price="1234.5")
+    assert share(client, f"?people={ids.jordan}").get_json() == {"text": "Jordan\n- Bike - $1,234.50"}
 
 
 def test_share_locked(client, ids, unlock):

@@ -1,12 +1,13 @@
-// #/person/<id>  One person: this occasion's gifts, their open ideas (each with Take, as on #/ideas), the plan and
-// budget editor, then history by occasion. School mode has no ideas: no list and no "+ Idea".
+// #/person/<id>  One person: this occasion's gifts, their open ideas (rows like the gifts, each opening that idea on
+// #/ideas, where it is taken or edited) with Copy list for the shared ones, the plan and budget editor, then history
+// by occasion. School mode has no ideas: no list and no "+ Idea".
 import { get, send } from "./api.js";
 import {
   centsToText, currentOccasion, dollarsToCents, esc, giverText, money, personById, renderColor, renderOptions,
   requireUnlocked, state, toast,
 } from "./core.js";
-import { assignChoices } from "./board.js";
-import { copyState, submitTake, toggleTake } from "./ideas.js";
+import { copyList } from "./board.js";
+import { NOTHING_SHARED, copyState, shareQuery } from "./ideas.js";
 import { isSchool } from "./mode.js";
 
 const PLANS = [
@@ -50,20 +51,19 @@ const renderNoGifts = gifts => (gifts.length ? "" : `<p class="empty">Nothing ye
 const renderHistoryGroup = (group, people, personId) => `<section class="col"><h3>${esc(group.name)}</h3><ul class="rows">${renderGifts(group.gifts, people, personId)}</ul></section>`;
 const renderHistory = (groups, people, personId) => groups.map(x => renderHistoryGroup(x, people, personId)).join("");
 
-// The person's open ideas, each with "Take…" opening the take form in its slot.
+// The person's open ideas, as rows like the gift rows: the row opens the idea on #/ideas (Take and Edit are there).
+const ideaLine = idea => [idea.store, idea.share ? "shared" : null].filter(Boolean).join(" · ");
 const renderIdeaRow = (idea, personId) => `<li class="row">
-    <div class="main"><div class="name">${esc(idea.title)}</div><div class="line">${esc(idea.store ?? "")}</div></div>
+    <a class="main" href="#/ideas?person=${esc(personId)}&amp;idea=${esc(idea.id)}"><div class="name">${esc(idea.title)}</div>
+      <div class="line"><span class="badge">idea</span> ${esc(ideaLine(idea))}</div></a>
     <div class="amt">${esc(money(idea.price_cents))}</div>
-    <div class="row-actions"><button type="button" class="btn small" data-take="${esc(idea.id)}" data-person="${esc(personId)}">Take…</button></div>
-    <div class="slot" data-take-slot="${esc(idea.id)}-${esc(personId)}"></div>
   </li>`;
 const renderIdeaRows = (list, personId) => list.map(i => renderIdeaRow(i, personId)).join("");
-const renderNameOption = n => `<option value="${esc(n)}"></option>`;
-const renderNameOptions = names => names.map(renderNameOption).join("");
-const renderIdeas = (list, personId, names, school) => {
+const renderIdeas = (list, personId, school) => {
   const open = school ? [] : list.filter(i => copyState(i, personId) === "open");
   return open.length
-    ? `<h3>Ideas</h3><ul class="rows">${renderIdeaRows(open, personId)}</ul><datalist id="giver-names">${renderNameOptions(names)}</datalist>`
+    ? `<div class="group-head"><h3>Ideas</h3><button type="button" class="btn small" data-copy-ideas>Copy list</button></div>
+      <div data-copy-box></div><ul class="rows">${renderIdeaRows(open, personId)}</ul>`
     : "";
 };
 const renderAddIdea = (person, school) => (school ? "" : `<a class="btn primary" href="#/idea?for=${esc(person.id)}">+ Idea</a>`);
@@ -86,7 +86,7 @@ export function findEntry(summary, personId) {
 
 const renderTotals = entry => (entry ? ` · ${esc(totalsText(entry))}` : "");
 
-export const renderPage = (person, groupName, occasion, plan, entry, gifts, history, people, { ideas = [], names = [], school = false } = {}) => `
+export const renderPage = (person, groupName, occasion, plan, entry, gifts, history, people, { ideas = [], school = false } = {}) => `
   <a class="back" href="#/">&larr; Home</a>
   <section class="card colored"${renderColor(person.color)}>
     <div class="head"><div><h2>${esc(person.name)}${renderInactive(person)}</h2><span class="sub">${renderSubline(person, groupName)}</span></div>
@@ -98,7 +98,7 @@ export const renderPage = (person, groupName, occasion, plan, entry, gifts, hist
       <h3>${esc(occasion.name)}</h3>
       <ul class="rows">${renderGifts(gifts, people, person.id)}</ul>
       ${renderNoGifts(gifts)}
-      ${renderIdeas(ideas, person.id, names, school)}
+      ${renderIdeas(ideas, person.id, school)}
     </div>
     <div class="col">
       <form id="plan" class="card fields">
@@ -129,34 +129,35 @@ export async function render(ctx) {
   }
   const school = isSchool(state.me);
   const none = Promise.resolve([]);
-  const [gifts, history, summary, groups, ideas, households, names] = await Promise.all([
+  const [gifts, history, summary, groups, ideas] = await Promise.all([
     get(`/api/occasions/${occasion.id}/people/${person.id}/gifts`),
     get(`/api/people/${person.id}/history`),
     get(`/api/occasions/${occasion.id}/summary`),
     get("/api/groups"),
     school ? none : get(`/api/ideas?person=${person.id}`),
-    school ? none : get("/api/households"),
-    school ? none : get("/api/giver-names"),
   ]);
   if (!ctx.alive()) return;
   const plan = occasion.people.find(p => p.person_id === person.id) ?? null;
   const groupName = groups.find(g => g.id === person.group_id)?.name ?? "";
   view.innerHTML = renderPage(person, groupName, occasion, plan, findEntry(summary, person.id), gifts,
-    groupByOccasion(history.gifts, occasion.id), state.people, { ideas, names, school });
+    groupByOccasion(history.gifts, occasion.id), state.people, { ideas, school });
   wirePlan(ctx, view.querySelector("#plan"), occasion, person, plan);
-  if (!school) wireIdeas(ctx, view, assignChoices(households, state.people));
+  if (!school) wireIdeas(view, person);
 }
 
-function wireIdeas(ctx, view, choices) {
-  view.addEventListener("click", e => {
-    const take = e.target.closest("[data-take]");
-    if (take) toggleTake(view, take, choices);
-    else if (e.target.closest("[data-cancel-take]")) e.target.closest(".slot").innerHTML = "";
-  });
-  view.addEventListener("submit", async e => {
-    if (e.target.dataset.form !== "take") return; // the plan form has its own listener
-    e.preventDefault();
-    if (await submitTake(e.target)) ctx.rerender();
+// Copy list: this person's shared open ideas (title, store, price, link) to the clipboard.
+function wireIdeas(view, person) {
+  view.addEventListener("click", async e => {
+    if (!e.target.closest?.("[data-copy-ideas]")) return;
+    let text;
+    try {
+      ({ text } = await get(shareQuery([person.id])));
+    } catch (err) {
+      toast(err.locked ? "Locked. Unlock, then try again." : err.message);
+      return;
+    }
+    if (!text) toast(NOTHING_SHARED);
+    else await copyList(text, view.querySelector("[data-copy-box]"));
   });
 }
 

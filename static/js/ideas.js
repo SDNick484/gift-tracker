@@ -2,7 +2,8 @@
 // copy (open; taken, with the occasion of the gift; held on the wishlist, with who holds it), the share switch, the
 // edit fields and Delete. "Take for <name>…" on an open copy opens a small form: who gives it (the board's fixed
 // giver list, or a typed name with suggestions) and the occasion (the current one first). Copy list puts the shared
-// open ideas of one person, the kids or everyone on the clipboard. The server leaves protected ideas out while
+// open ideas of one person, the kids or everyone on the clipboard (name, then title, store, price and link per idea).
+// &idea=<id> scrolls to that idea (the person screen links here). The server leaves protected ideas out while
 // locked and answers 423 for a list naming a protected person; nothing here decides that.
 import { get, send } from "./api.js";
 import { centsToText, choosablePeople, currentOccasion, esc, money, renderChecked, renderColor, renderOptions, state, toast } from "./core.js";
@@ -23,6 +24,8 @@ export const filterIdeas = (ideas, personId) => (personId === null || personId =
 
 // "The kids": the active protected people.
 export const kidsIds = people => people.filter(p => p.active && p.protected).map(p => p.id);
+
+export const NOTHING_SHARED = "Nothing to copy: tick “Share with relatives” on an idea first.";
 
 // GET path for the copied list: null is everyone this request may see.
 export const shareQuery = ids => (ids ? `/api/ideas/share?people=${ids.join(",")}` : "/api/ideas/share");
@@ -177,6 +180,7 @@ export async function render(ctx) {
   const choosable = choosablePeople().filter(p => !p.is_user);
   view.innerHTML = renderIdeasPage({ ideas, people: state.people, choosable, occasions: state.occasions, personId, names });
   const choices = assignChoices(households, state.people);
+  if (/^\d+$/.test(ctx.query.idea ?? "")) view.querySelector(`section[data-idea="${ctx.query.idea}"]`)?.scrollIntoView?.();
 
   const run = async (action, done) => {
     try {
@@ -199,7 +203,7 @@ export async function render(ctx) {
       if (!err.locked) toast(err.message);
       return;
     }
-    if (!text) toast("Nothing shared and open to copy.");
+    if (!text) toast(NOTHING_SHARED);
     else await copyList(text, view.querySelector("[data-copy-box]"));
   };
 
